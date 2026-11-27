@@ -29,7 +29,7 @@ iWinStart   = input.int(1000, "Silver Bullet start (HHMM)", minval = 0, maxval =
 iWinEnd     = input.int(1100, "Silver Bullet end (HHMM)", minval = 0, maxval = 2359, group = G1)
 iSweepStart = input.int(930, "Start watching sweeps (HHMM)", minval = 0, maxval = 2359, group = G1)
 iFlatten    = input.int(1200, "Flatten all (HHMM)", minval = 0, maxval = 2359, group = G1)
-iFrom       = input.time(timestamp(2000, 1, 1, 0, 0), "Only trade after", group = G1)
+iFrom       = input.time(timestamp("01 Jan 2000 00:00 +0000"), "Only trade after", group = G1)
 
 G2 = "2. Bias (15m)"
 iBias     = input.string("HTF EMA", "Bias mode", options = ["Off", "HTF EMA", "HTF EMA + structure"], group = G2)
