@@ -129,7 +129,7 @@ It should be close, but I couldn't measure it here: you need to backtest it in N
 
 The chart shows a shaded 10:00–11:00 window, arrows at sweeps, "MSS" labels, and a box on the FVG used for the entry.
 
-> If F5 reports an error on `Core.Globals.GeneralOptions.TimeZoneInfo`, replace that expression with `TimeZoneInfo.Local` (NinjaTrader uses your PC's time zone by default).
+> If F5 shows errors, check the file name in the error list. NinjaTrader compiles every script in the Custom folder together, so an error in a *different* script also blocks this one.
 
 ---
 

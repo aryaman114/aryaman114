@@ -93,7 +93,7 @@ sweepFrom = hhmm(iSweepStart)
 flatAt    = hhmm(iFlatten)
 
 // 15m EMA14 + 15m market structure, values of the LAST CLOSED 15m bar (no repainting).
-htfData(int len, int slope, int s) =>
+htfData(simple int len, simple int slope, simple int s) =>
     float e = ta.ema(close, len)
     var float sh = na
     var float sl = na
@@ -264,12 +264,12 @@ if bar_index >= 2 * iSwing
         swLowBroken := false
 
 // ---------------------------------------------------------------- setup helpers
-tookKey(int dir, float price, bool orReady) =>
+tookKey(int dir, float price, bool orDone) =>
     bool r = false
     if dir > 0
-        r := (not na(onLow) and price < onLow) or (orReady and not na(orLow) and price < orLow) or (not na(pdLow) and price < pdLow)
+        r := (not na(onLow) and price < onLow) or (orDone and not na(orLow) and price < orLow) or (not na(pdLow) and price < pdLow)
     else
-        r := (not na(onHigh) and price > onHigh) or (orReady and not na(orHigh) and price > orHigh) or (not na(pdHigh) and price > pdHigh)
+        r := (not na(onHigh) and price > onHigh) or (orDone and not na(orHigh) and price > orHigh) or (not na(pdHigh) and price > pdHigh)
     r
 
 // Newest unmitigated FVG inside the displacement leg: [found, proximal, distal, barsAgo]
@@ -277,7 +277,7 @@ findFvg(int dir, float sExt, int maxI, float minGap, bool useMid) =>
     bool  found = false
     float prox  = na
     float dist  = na
-    int   at    = -1
+    int   atBar = -1
     if maxI >= 0
         for i = 0 to maxI
             float p = dir > 0 ? low[i] : high[i]
@@ -295,9 +295,9 @@ findFvg(int dir, float sExt, int maxI, float minGap, bool useMid) =>
                     found := true
                     prox  := p
                     dist  := d
-                    at    := i
+                    atBar := i
                     break
-    [found, prox, dist, at]
+    [found, prox, dist, atBar]
 
 computeTarget(int dir, float entry, float risk) =>
     float result = entry + dir * iRR * risk
@@ -472,7 +472,7 @@ if ready
                 setupDir := 0
             else
                 int maxI = math.min(bar_index - sweepBar - 2, iFvgLook)
-                [found, prox, dist, at] = findFvg(setupDir, sweepExt, maxI, iMinFvg * syminfo.mintick, iEntryMode == "FVG midpoint")
+                [found, prox, dist, fvgAt] = findFvg(setupDir, sweepExt, maxI, iMinFvg * syminfo.mintick, iEntryMode == "FVG midpoint")
                 if found
                     float entry   = math.round_to_mintick(iEntryMode == "FVG midpoint" ? (prox + dist) / 2 : prox)
                     float stopRef = iStopMode == "Sweep extreme" ? sweepExt : dist

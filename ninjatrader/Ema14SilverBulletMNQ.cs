@@ -229,10 +229,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 try { nyTz = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time"); }
                 catch { nyTz = TimeZoneInfo.Local; }
-                try { platformTz = Core.Globals.GeneralOptions.TimeZoneInfo; }
-                catch { platformTz = TimeZoneInfo.Local; }
-                if (platformTz == null)
-                    platformTz = TimeZoneInfo.Local;
+                platformTz = GetPlatformTimeZone();
 
                 noTradeDates = new HashSet<DateTime>();
                 if (!string.IsNullOrWhiteSpace(NoTradeDates))
@@ -881,6 +878,39 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (platformTz == null || nyTz == null || platformTz.Id == nyTz.Id)
                 return t;
             return TimeZoneInfo.ConvertTime(t, platformTz, nyTz);
+        }
+
+        // NinjaTrader's own time zone setting (Tools > Options > General). Read via reflection
+        // so the script compiles on every NT8 build; falls back to the Windows time zone.
+        private static TimeZoneInfo GetPlatformTimeZone()
+        {
+            try
+            {
+                const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Public
+                    | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Instance;
+                Type globals = typeof(NinjaTrader.Core.Globals);
+                object options = null;
+                System.Reflection.PropertyInfo optProp = globals.GetProperty("GeneralOptions", flags);
+                if (optProp != null)
+                    options = optProp.GetValue(null, null);
+                else
+                {
+                    System.Reflection.FieldInfo optField = globals.GetField("GeneralOptions", flags);
+                    if (optField != null)
+                        options = optField.GetValue(null);
+                }
+                if (options != null)
+                {
+                    System.Reflection.PropertyInfo tzProp = options.GetType().GetProperty("TimeZoneInfo", flags);
+                    TimeZoneInfo tz = tzProp != null ? tzProp.GetValue(options, null) as TimeZoneInfo : null;
+                    if (tz != null)
+                        return tz;
+                }
+            }
+            catch
+            {
+            }
+            return TimeZoneInfo.Local;
         }
 
         private static TimeSpan Hhmm(int value)
