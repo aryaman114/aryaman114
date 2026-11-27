@@ -1,0 +1,567 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ICT 10 AM SILVER BULLET  —  Liquidity Sweep  →  Market Structure Shift  →  FVG
+//
+//  Market      : Nasdaq-100 futures (NQ1! / MNQ1!, CME)
+//  Chart TF    : 1 minute recommended (2–5 min also work, see README)
+//  Time zone   : every session below is New York time, whatever your chart TZ is
+//
+//  Model (long; short is the mirror image)
+//   1. Bias      : higher-timeframe market structure is bullish (last HTF BOS up)
+//   2. Liquidity : price SWEEPS a sell-side pool (PDL, Asia low, London low,
+//                  NY pre-open low or a recent swing low) during 09:30–11:00
+//   3. MSS       : price closes back above the last internal swing high with
+//                  displacement (strong body)  →  market structure shift
+//   4. Entry     : first bullish FVG of that displacement leg, formed inside the
+//                  10:00–11:00 Silver Bullet hour → limit order in the FVG
+//   5. Stop      : beyond the sweep extreme (or FVG candle 1) + buffer
+//   6. Target    : fixed R multiple, or the nearest opposing (buy-side) liquidity
+//   7. Management: optional breakeven at X R, unfilled orders cancelled at 11:00,
+//                  everything flat at the force-flat time
+//
+//  Educational tool — not financial advice. Backtest and paper-trade first.
+// ═══════════════════════════════════════════════════════════════════════════════
+strategy("ICT 10AM Silver Bullet - Sweep + MSS + FVG [NQ]",
+     shorttitle        = "ICT SB 10AM",
+     overlay           = true,
+     initial_capital   = 50000,
+     currency          = currency.USD,
+     default_qty_type  = strategy.fixed,
+     default_qty_value = 1,
+     pyramiding        = 0,
+     commission_type   = strategy.commission.cash_per_contract,
+     commission_value  = 2.5,
+     slippage          = 2,
+     margin_long       = 1,
+     margin_short      = 1,
+     max_bars_back     = 1000,
+     max_lines_count   = 500,
+     max_labels_count  = 500,
+     max_boxes_count   = 500)
+
+// ───────────────────────────────────────────────────────────────────────────────
+//  Constants
+// ───────────────────────────────────────────────────────────────────────────────
+const string TZ       = "America/New_York"
+const string E_EDGE   = "FVG near edge (first touch)"
+const string E_CE     = "FVG CE (50%)"
+const string E_FAR    = "FVG far edge"
+const string SL_SWEEP = "Beyond sweep extreme"
+const string SL_C1    = "Beyond FVG candle 1"
+const string TP_RR    = "Fixed R:R"
+const string TP_LIQ   = "Opposing liquidity"
+const string SZ_FIX   = "Fixed contracts"
+const string SZ_RISK  = "Risk $ per trade"
+
+// ───────────────────────────────────────────────────────────────────────────────
+//  Inputs
+// ───────────────────────────────────────────────────────────────────────────────
+const string G_SES = "Sessions (New York time)"
+sbSess     = input.session("1000-1100", "Silver Bullet entry window", group = G_SES, tooltip = "Limit orders are only placed inside this window and are cancelled when it ends.")
+sweepSess  = input.session("0930-1100", "Liquidity sweep window",     group = G_SES, tooltip = "A sweep of a liquidity pool only arms a setup inside this window.")
+flatSess   = input.session("1200-1700", "Force-flat window",          group = G_SES, tooltip = "Any open position is closed at the first bar inside this window.")
+maxTrades  = input.int(1, "Max trades per day", minval = 1, maxval = 5, group = G_SES)
+allowLong  = input.bool(true, "Allow longs",  inline = "dir", group = G_SES)
+allowShort = input.bool(true, "Allow shorts", inline = "dir", group = G_SES)
+
+const string G_LIQ = "Liquidity pools"
+usePDHL  = input.bool(true, "Previous day high / low", group = G_LIQ)
+useAsia  = input.bool(true, "Asia high / low",   inline = "asia", group = G_LIQ)
+asiaSess = input.session("2000-0000", "",        inline = "asia", group = G_LIQ)
+useLon   = input.bool(true, "London high / low", inline = "lon",  group = G_LIQ)
+lonSess  = input.session("0200-0500", "",        inline = "lon",  group = G_LIQ)
+useNY    = input.bool(true, "NY pre-SB high / low", inline = "ny", group = G_LIQ)
+nySess   = input.session("0830-1000", "",           inline = "ny", group = G_LIQ)
+useSwing = input.bool(true, "Swing highs / lows, pivot length", inline = "sw", group = G_LIQ)
+swingLen = input.int(5, "", minval = 2, inline = "sw", group = G_LIQ)
+maxSwing = input.int(3, "Max un-swept swing pools per side", minval = 1, group = G_LIQ)
+reqClose = input.bool(false, "Sweep candle must close back inside the level", group = G_LIQ, tooltip = "ON = strict 'turtle soup' sweep (wick through, close back). OFF = any trade through the level counts; the MSS confirms the reversal.")
+
+const string G_MSS = "Market structure shift"
+intLen     = input.int(2, "Internal swing length (MSS pivots)", minval = 1, group = G_MSS)
+mssTimeout = input.int(30, "Max bars from sweep to MSS", minval = 1, group = G_MSS)
+useDisp    = input.bool(true, "Require displacement: MSS body ≥", inline = "disp", group = G_MSS)
+dispMult   = input.float(1.0, "× ATR(14)", minval = 0.1, step = 0.1, inline = "disp", group = G_MSS)
+
+const string G_FVG = "Fair value gap entry"
+entryMode   = input.string(E_CE, "Entry price", options = [E_EDGE, E_CE, E_FAR], group = G_FVG)
+minFvgTicks = input.int(4, "Min FVG size (ticks)", minval = 1, group = G_FVG)
+fvgWait     = input.int(5, "Bars after MSS to wait for an FVG", minval = 1, group = G_FVG)
+fvgInWin    = input.bool(true, "FVG must form inside the Silver Bullet window", group = G_FVG)
+
+const string G_RSK = "Risk & exits"
+stopMode   = input.string(SL_SWEEP, "Stop loss", options = [SL_SWEEP, SL_C1], group = G_RSK)
+stopBuf    = input.int(4, "Stop buffer (ticks)", minval = 0, group = G_RSK)
+minStop    = input.float(5.0,  "Min stop (points)", minval = 0.25, step = 0.25, group = G_RSK, tooltip = "Stops tighter than this are widened to this distance.")
+maxStop    = input.float(40.0, "Max stop (points)", minval = 1.0,  step = 0.25, group = G_RSK, tooltip = "Setups that need a wider stop are skipped.")
+tpMode     = input.string(TP_RR, "Target", options = [TP_RR, TP_LIQ], group = G_RSK)
+rr         = input.float(2.0, "R:R (fixed target / fallback)", minval = 0.5, step = 0.25, group = G_RSK)
+minRR      = input.float(1.5, "Min R:R for a liquidity target", minval = 0.5, step = 0.25, group = G_RSK)
+useBE      = input.bool(true, "Move stop to breakeven at", inline = "be", group = G_RSK)
+beR        = input.float(1.0, "R", minval = 0.25, step = 0.25, inline = "be", group = G_RSK)
+sizing     = input.string(SZ_FIX, "Position sizing", options = [SZ_FIX, SZ_RISK], group = G_RSK)
+fixedQty   = input.int(1, "Contracts (fixed)", minval = 1, group = G_RSK)
+riskUsd    = input.float(500.0, "Risk $ per trade", minval = 10.0, group = G_RSK)
+maxQty     = input.int(10, "Max contracts", minval = 1, group = G_RSK)
+
+const string G_BIAS = "Bias filters"
+useHTF = input.bool(true, "HTF market-structure bias", inline = "htf", group = G_BIAS)
+htfTF  = input.timeframe("60", "", inline = "htf", group = G_BIAS)
+htfLen = input.int(3, "HTF pivot length", minval = 1, group = G_BIAS)
+usePD  = input.bool(false, "Premium / discount vs midnight open", group = G_BIAS, tooltip = "Longs only when the entry is BELOW the 00:00 NY open (discount); shorts only when ABOVE it (premium).")
+
+const string G_VIS = "Visuals"
+showPools = input.bool(true,  "Liquidity pool lines", group = G_VIS)
+showSetup = input.bool(true,  "Sweep / MSS / FVG / trade drawings", group = G_VIS)
+showSkips = input.bool(false, "Label skipped setups (debug)", group = G_VIS)
+showMO    = input.bool(true,  "Midnight open line", group = G_VIS)
+showWin   = input.bool(true,  "Shade Silver Bullet window", group = G_VIS)
+showTable = input.bool(true,  "Dashboard", group = G_VIS)
+bslCol    = input.color(#f23645, "Buy-side liquidity",  inline = "c1", group = G_VIS)
+sslCol    = input.color(#089981, "Sell-side liquidity", inline = "c1", group = G_VIS)
+fvgCol    = input.color(#2962ff, "FVG", inline = "c2", group = G_VIS)
+moCol     = input.color(#9c27b0, "Midnight open", inline = "c2", group = G_VIS)
+
+// ───────────────────────────────────────────────────────────────────────────────
+//  Types & state
+// ───────────────────────────────────────────────────────────────────────────────
+type Pool
+    float  price
+    bool   isHigh
+    string name
+    bool   isSwing = false
+    bool   swept   = false
+    line   ln
+    label  lb
+
+// stage: 0 idle | 1 swept, waiting MSS | 2 MSS, waiting FVG | 3 FVG ready | 4 limit working | 5 in trade
+type Setup
+    int    dir           = 0
+    int    stage         = 0
+    string pool          = ""
+    float  ext           = na
+    int    sweepBar      = na
+    int    mssBar        = na
+    float  entry         = na
+    float  stop          = na
+    float  tp            = na
+    float  risk          = na
+    int    placedBar     = na
+    int    tradesAtPlace = na
+    bool   beDone        = false
+
+var array<Pool> pools = array.new<Pool>()
+var Setup       S     = Setup.new()
+
+// ───────────────────────────────────────────────────────────────────────────────
+//  Helpers
+// ───────────────────────────────────────────────────────────────────────────────
+inS(string s) =>
+    not na(time(timeframe.period, s + ":1234567", TZ))
+
+// running high / low of a session and the bar it started on
+sessHL(bool active, bool started) =>
+    var float h  = na
+    var float l  = na
+    var int   b0 = na
+    if started
+        h  := high
+        l  := low
+        b0 := bar_index
+    else if active
+        h  := math.max(h, high)
+        l  := math.min(l, low)
+    [h, l, b0]
+
+// HTF structure: +1 after a close above the last pivot high, -1 after a close below
+// the last pivot low. Returns the value of the last CLOSED HTF bar (no repainting).
+htfStructure(int len) =>
+    float ph = ta.pivothigh(high, len, len)
+    float pl = ta.pivotlow(low, len, len)
+    var float hiLvl = na
+    var float loLvl = na
+    var int   dir   = 0
+    if not na(ph)
+        hiLvl := ph
+    if not na(pl)
+        loLvl := pl
+    if not na(hiLvl) and close > hiLvl
+        dir   := 1
+        hiLvl := na
+    if not na(loLvl) and close < loLvl
+        dir   := -1
+        loLvl := na
+    nz(dir[1])
+
+addPool(float px, bool isHigh, string nm, bool isSwing, int x1) =>
+    if not na(px)
+        Pool p = Pool.new(px, isHigh, nm, isSwing)
+        if showPools
+            color c = isHigh ? bslCol : sslCol
+            p.ln := line.new(x1, px, bar_index, px, color = c, style = line.style_dotted, width = 1, extend = extend.right)
+            p.lb := label.new(x1, px, nm, color = color.new(c, 100), textcolor = c, style = label.style_label_lower_left, size = size.tiny)
+        pools.push(p)
+
+// keep only the most recent `maxSwing` un-swept swing pools per side
+trimSwing(bool isHigh) =>
+    int cnt = 0
+    for p in pools
+        if p.isSwing and p.isHigh == isHigh and not p.swept
+            cnt += 1
+    if cnt > maxSwing
+        int idx = -1
+        for [i, p] in pools
+            if p.isSwing and p.isHigh == isHigh and not p.swept
+                idx := i
+                break
+        if idx >= 0
+            Pool r = pools.remove(idx)
+            r.ln.delete()
+            r.lb.delete()
+
+// nearest un-swept opposing pool at least `minDist` away from entry
+liqTarget(int dir, float entry, float minDist) =>
+    float best = na
+    for p in pools
+        if not p.swept
+            bool ok = dir == 1 ? (p.isHigh and p.price >= entry + minDist) : (not p.isHigh and p.price <= entry - minDist)
+            if ok and (na(best) or (dir == 1 ? p.price < best : p.price > best))
+                best := p.price
+    best
+
+calcQty(float riskPts) =>
+    float q = sizing == SZ_FIX ? float(fixedQty) : math.floor(riskUsd / (riskPts * syminfo.pointvalue))
+    math.min(q, float(maxQty))
+
+skipLabel(string why) =>
+    if showSkips
+        label.new(bar_index, high, "skip: " + why, yloc = yloc.abovebar, style = label.style_label_down, color = color.new(color.gray, 30), textcolor = color.white, size = size.tiny)
+
+// ───────────────────────────────────────────────────────────────────────────────
+//  Core series
+// ───────────────────────────────────────────────────────────────────────────────
+float atr     = ta.atr(14)
+float tick    = syminfo.mintick
+bool  inSB    = inS(sbSess)
+bool  inSweep = inS(sweepSess)
+bool  inFlat  = inS(flatSess)
+bool  newDay  = timeframe.change("D")          // CME trading day starts 18:00 NY
+
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+int htfRaw  = request.security(syminfo.tickerid, htfTF, htfStructure(htfLen), lookahead = barmerge.lookahead_on)
+int htfBias = useHTF ? nz(htfRaw) : 0
+
+// midnight (00:00 NY) open
+var float midOpen = na
+int nyHour = hour(time, TZ)
+if newDay
+    midOpen := na
+if nyHour == 0 and nyHour[1] != 0
+    midOpen := open
+
+// session ranges
+bool inAsia = inS(asiaSess)
+bool inLon  = inS(lonSess)
+bool inNY   = inS(nySess)
+[asiaH, asiaL, asiaB] = sessHL(inAsia, inAsia and not inAsia[1])
+[lonH,  lonL,  lonB ] = sessHL(inLon,  inLon  and not inLon[1])
+[nyH,   nyL,   nyB  ] = sessHL(inNY,   inNY   and not inNY[1])
+
+// pivots: swing pools + internal structure for the MSS
+float sph = ta.pivothigh(high, swingLen, swingLen)
+float spl = ta.pivotlow(low,  swingLen, swingLen)
+float iph = ta.pivothigh(high, intLen, intLen)
+float ipl = ta.pivotlow(low,  intLen, intLen)
+
+var float lastIPH    = na
+var int   lastIPHBar = na
+var float lastIPL    = na
+var int   lastIPLBar = na
+if not na(iph)
+    lastIPH    := iph
+    lastIPHBar := bar_index - intLen
+if not na(ipl)
+    lastIPL    := ipl
+    lastIPLBar := bar_index - intLen
+
+int totalTrades = strategy.closedtrades + strategy.opentrades
+var int dayStartTrades = 0
+
+// ───────────────────────────────────────────────────────────────────────────────
+//  New trading day → reset pools and state
+// ───────────────────────────────────────────────────────────────────────────────
+if newDay
+    for p in pools
+        if not p.swept and not na(p.ln)
+            p.ln.set_extend(extend.none)
+            p.ln.set_x2(bar_index - 1)
+    pools.clear()
+    if S.stage >= 1 and S.stage <= 4
+        strategy.cancel_all()
+        S := Setup.new()
+    dayStartTrades := totalTrades
+    if usePDHL
+        addPool(pdh, true,  "PDH", false, bar_index)
+        addPool(pdl, false, "PDL", false, bar_index)
+
+int tradesToday = totalTrades - dayStartTrades
+
+// ───────────────────────────────────────────────────────────────────────────────
+//  Build liquidity pools when their session completes
+// ───────────────────────────────────────────────────────────────────────────────
+if useAsia and inAsia[1] and not inAsia
+    addPool(asiaH, true,  "Asia H", false, asiaB)
+    addPool(asiaL, false, "Asia L", false, asiaB)
+if useLon and inLon[1] and not inLon
+    addPool(lonH, true,  "London H", false, lonB)
+    addPool(lonL, false, "London L", false, lonB)
+if useNY and inNY[1] and not inNY
+    addPool(nyH, true,  "NY H", false, nyB)
+    addPool(nyL, false, "NY L", false, nyB)
+if useSwing and not na(sph)
+    addPool(sph, true, "Swing H", true, bar_index - swingLen)
+    trimSwing(true)
+if useSwing and not na(spl)
+    addPool(spl, false, "Swing L", true, bar_index - swingLen)
+    trimSwing(false)
+
+// ───────────────────────────────────────────────────────────────────────────────
+//  1) Liquidity sweeps
+// ───────────────────────────────────────────────────────────────────────────────
+bool   bullSweep = false     // sell-side taken → look for longs
+bool   bearSweep = false     // buy-side taken  → look for shorts
+string bullName  = ""
+string bearName  = ""
+for p in pools
+    if not p.swept
+        bool hitH = p.isHigh and high > p.price
+        bool hitL = not p.isHigh and low < p.price
+        if hitH or hitL
+            p.swept := true
+            if not na(p.ln)
+                p.ln.set_extend(extend.none)
+                p.ln.set_x2(bar_index)
+                p.ln.set_style(line.style_solid)
+                p.lb.set_text(p.name + " swept")
+            if hitH and (not reqClose or close < p.price)
+                bearSweep := true
+                bearName  := bearName == "" ? p.name : bearName + ", " + p.name
+            if hitL and (not reqClose or close > p.price)
+                bullSweep := true
+                bullName  := bullName == "" ? p.name : bullName + ", " + p.name
+
+bool canSetup = inSweep and not inFlat and strategy.position_size == 0 and tradesToday < maxTrades and S.stage < 3
+if canSetup and bullSweep != bearSweep
+    int  d       = bullSweep ? 1 : -1
+    bool allowed = (d == 1 ? allowLong : allowShort) and (not useHTF or htfBias == d)
+    bool replace = S.stage <= 1 or S.dir == d          // never let the MSS leg's own sweep flip a live setup
+    if allowed and replace
+        S := Setup.new(dir = d, stage = 1, pool = d == 1 ? bullName : bearName, ext = d == 1 ? low : high, sweepBar = bar_index)
+        if showSetup
+            if d == 1
+                label.new(bar_index, low, "SSL sweep\n" + bullName, yloc = yloc.belowbar, style = label.style_label_up, color = color.new(sslCol, 15), textcolor = color.white, size = size.small)
+            else
+                label.new(bar_index, high, "BSL sweep\n" + bearName, yloc = yloc.abovebar, style = label.style_label_down, color = color.new(bslCol, 15), textcolor = color.white, size = size.small)
+    else if not allowed and (d == 1 ? allowLong : allowShort)
+        skipLabel("against HTF bias")
+
+// ───────────────────────────────────────────────────────────────────────────────
+//  2) Market structure shift (close through internal swing + displacement)
+// ───────────────────────────────────────────────────────────────────────────────
+if S.stage == 1
+    if S.dir == 1
+        S.ext := math.min(S.ext, low)
+        bool disp = not useDisp or (close - open) >= dispMult * atr
+        if not na(lastIPH) and close > lastIPH and disp
+            S.stage  := 2
+            S.mssBar := bar_index
+            if showSetup
+                line.new(lastIPHBar, lastIPH, bar_index, lastIPH, color = sslCol, style = line.style_dashed, width = 2)
+                label.new(int(math.avg(lastIPHBar, bar_index)), lastIPH, "MSS", style = label.style_label_down, color = color.new(sslCol, 100), textcolor = sslCol, size = size.small)
+    else
+        S.ext := math.max(S.ext, high)
+        bool disp = not useDisp or (open - close) >= dispMult * atr
+        if not na(lastIPL) and close < lastIPL and disp
+            S.stage  := 2
+            S.mssBar := bar_index
+            if showSetup
+                line.new(lastIPLBar, lastIPL, bar_index, lastIPL, color = bslCol, style = line.style_dashed, width = 2)
+                label.new(int(math.avg(lastIPLBar, bar_index)), lastIPL, "MSS", style = label.style_label_up, color = color.new(bslCol, 100), textcolor = bslCol, size = size.small)
+    if S.stage == 1 and bar_index - S.sweepBar > mssTimeout
+        skipLabel("no MSS in time")
+        S := Setup.new()
+
+// a structure level that has been closed through is used up
+if not na(lastIPH) and close > lastIPH
+    lastIPH := na
+if not na(lastIPL) and close < lastIPL
+    lastIPL := na
+
+// ───────────────────────────────────────────────────────────────────────────────
+//  3) Fair value gap in the displacement leg → build the order
+// ───────────────────────────────────────────────────────────────────────────────
+if S.stage == 2
+    bool  bull   = S.dir == 1
+    float minGap = minFvgTicks * tick
+    int   maxI   = math.min(bar_index - S.sweepBar - 2, 60)
+    int   fi     = -1
+    float fTop   = na
+    float fBot   = na
+    if maxI >= 0
+        for i = 0 to maxI
+            bool gap = bull ? (low[i] - high[i + 2] >= minGap) : (low[i + 2] - high[i] >= minGap)
+            if gap and (not fvgInWin or inSB[i])
+                float t = bull ? low[i] : low[i + 2]
+                float b = bull ? high[i + 2] : high[i]
+                bool intact = true                          // not fully traded through since it formed
+                if i > 0
+                    for j = 0 to i - 1
+                        if bull ? low[j] <= b : high[j] >= t
+                            intact := false
+                            break
+                if intact
+                    fi   := i
+                    fTop := t
+                    fBot := b
+                    break
+    if fi >= 0
+        float c1   = bull ? low[fi + 2] : high[fi + 2]
+        float e    = entryMode == E_EDGE ? (bull ? fTop : fBot) : entryMode == E_FAR ? (bull ? fBot : fTop) : (fTop + fBot) / 2
+        e         := math.round_to_mintick(e)
+        float base = stopMode == SL_SWEEP ? S.ext : c1
+        float sl   = bull ? base - stopBuf * tick : base + stopBuf * tick
+        float r    = bull ? e - sl : sl - e
+        if r < minStop
+            sl := bull ? e - minStop : e + minStop
+            r  := minStop
+        float tp = bull ? e + rr * r : e - rr * r
+        if tpMode == TP_LIQ
+            float lt = liqTarget(S.dir, e, minRR * r)
+            if not na(lt)
+                tp := bull ? lt - tick : lt + tick
+        string why = ""
+        if r > maxStop
+            why := "stop " + str.tostring(r, "#.##") + " pts > max"
+        else if usePD and not na(midOpen) and (bull ? e > midOpen : e < midOpen)
+            why := bull ? "entry in premium" : "entry in discount"
+        if why != ""
+            skipLabel(why)
+            S := Setup.new()
+        else
+            S.entry := e
+            S.stop  := math.round_to_mintick(sl)
+            S.tp    := math.round_to_mintick(tp)
+            S.risk  := r
+            S.stage := 3
+            if showSetup
+                box.new(bar_index - fi - 2, fTop, bar_index + 10, fBot, border_color = color.new(fvgCol, 40), bgcolor = color.new(fvgCol, 82), text = "FVG", text_color = fvgCol, text_size = size.tiny, text_halign = text.align_right)
+    else if bar_index - S.mssBar >= fvgWait
+        skipLabel("no FVG")
+        S := Setup.new()
+
+// ───────────────────────────────────────────────────────────────────────────────
+//  4) Place the limit order inside the Silver Bullet window
+// ───────────────────────────────────────────────────────────────────────────────
+if S.stage == 3
+    bool bull  = S.dir == 1
+    bool hitSL = bull ? low <= S.stop : high >= S.stop
+    bool hitTP = bull ? high >= S.tp : low <= S.tp
+    if hitSL or hitTP
+        skipLabel(hitTP ? "target hit before entry" : "stop hit before entry")
+        S := Setup.new()
+    else if inSB and not inFlat and strategy.position_size == 0 and tradesToday < maxTrades
+        float q = calcQty(S.risk)
+        if q < 1
+            skipLabel("risk $ too small for 1 contract")
+            S := Setup.new()
+        else
+            S.tradesAtPlace := totalTrades
+            S.placedBar     := bar_index
+            S.stage         := 4
+            string ent = bull ? "SB Long" : "SB Short"
+            strategy.entry(ent, bull ? strategy.long : strategy.short, qty = q, limit = S.entry, comment = ent + " | " + S.pool)
+            strategy.exit(ent + " X", from_entry = ent, stop = S.stop, limit = S.tp, comment_loss = "SL", comment_profit = "TP")
+            if showSetup
+                int x2 = bar_index + 30
+                box.new(bar_index, math.max(S.entry, S.tp), x2, math.min(S.entry, S.tp), border_color = color.new(color.green, 60), bgcolor = color.new(color.green, 85))
+                box.new(bar_index, math.max(S.entry, S.stop), x2, math.min(S.entry, S.stop), border_color = color.new(color.red, 60), bgcolor = color.new(color.red, 85))
+                label.new(x2, S.entry, ent + " " + str.tostring(S.entry, format.mintick) + "\nSL " + str.tostring(S.stop, format.mintick) + "  TP " + str.tostring(S.tp, format.mintick) + "\nRisk " + str.tostring(S.risk, "#.##") + " pts x " + str.tostring(q), style = label.style_label_left, color = color.new(color.black, 20), textcolor = color.white, size = size.small)
+            alert("ICT SB " + syminfo.ticker + ": " + ent + " LIMIT " + str.tostring(S.entry, format.mintick) + " | SL " + str.tostring(S.stop, format.mintick) + " | TP " + str.tostring(S.tp, format.mintick) + " | qty " + str.tostring(q) + " | swept " + S.pool, alert.freq_once_per_bar_close)
+    else if not inSB and not inSweep
+        S := Setup.new()
+
+// ───────────────────────────────────────────────────────────────────────────────
+//  5) Pending order: detect fill, or cancel at window end / if price runs to TP
+// ───────────────────────────────────────────────────────────────────────────────
+if S.stage == 4 and bar_index > S.placedBar
+    bool bull = S.dir == 1
+    if totalTrades > S.tradesAtPlace
+        S.stage := 5
+    else if not inSB or inFlat or (bull ? high >= S.tp : low <= S.tp)
+        strategy.cancel(bull ? "SB Long" : "SB Short")
+        strategy.cancel(bull ? "SB Long X" : "SB Short X")
+        S := Setup.new()
+
+// ───────────────────────────────────────────────────────────────────────────────
+//  6) In trade: breakeven management
+// ───────────────────────────────────────────────────────────────────────────────
+if S.stage == 5
+    if strategy.position_size == 0
+        S := Setup.new()
+    else if useBE and not S.beDone
+        bool  bull = S.dir == 1
+        float avg  = strategy.position_avg_price
+        if bull ? high >= avg + beR * S.risk : low <= avg - beR * S.risk
+            S.beDone := true
+            S.stop   := math.round_to_mintick(avg)
+            string ent = bull ? "SB Long" : "SB Short"
+            strategy.exit(ent + " X", from_entry = ent, stop = S.stop, limit = S.tp, comment_loss = "BE", comment_profit = "TP")
+
+// leftover setups after the windows close
+if S.stage >= 1 and S.stage <= 2 and not inSweep and not inSB
+    S := Setup.new()
+
+// ───────────────────────────────────────────────────────────────────────────────
+//  7) Force flat
+// ───────────────────────────────────────────────────────────────────────────────
+if inFlat and strategy.position_size != 0
+    strategy.close_all(comment = "Time exit")
+
+// ───────────────────────────────────────────────────────────────────────────────
+//  Visuals
+// ───────────────────────────────────────────────────────────────────────────────
+plot(showMO ? midOpen : na, "Midnight open", color = moCol, style = plot.style_linebr, linewidth = 1)
+bgcolor(showWin and inSB ? color.new(color.orange, 92) : na, title = "Silver Bullet window")
+
+var table dash = table.new(position.top_right, 2, 7, bgcolor = color.new(color.black, 25), border_color = color.new(color.gray, 60), border_width = 1)
+if showTable and barstate.islast
+    string biasTxt = not useHTF ? "off" : htfBias == 1 ? "BULLISH" : htfBias == -1 ? "BEARISH" : "neutral"
+    color  biasCol = htfBias == 1 ? sslCol : htfBias == -1 ? bslCol : color.gray
+    string pdTxt   = na(midOpen) ? "–" : close > midOpen ? "Premium (above MO)" : "Discount (below MO)"
+    string stTxt   = switch S.stage
+        0 => "Waiting for sweep"
+        1 => "Swept " + S.pool + " → wait MSS"
+        2 => "MSS done → wait FVG"
+        3 => "FVG ready → wait window"
+        4 => "Limit order working"
+        5 => "In trade"
+        => "–"
+    table.cell(dash, 0, 0, "ICT 10AM Silver Bullet", text_color = color.white, text_size = size.small)
+    table.merge_cells(dash, 0, 0, 1, 0)
+    table.cell(dash, 0, 1, "HTF bias (" + htfTF + ")", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 1, biasTxt, text_color = biasCol, text_size = size.small)
+    table.cell(dash, 0, 2, "Price vs midnight open", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 2, pdTxt, text_color = color.white, text_size = size.small)
+    table.cell(dash, 0, 3, "Trades today", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 3, str.tostring(tradesToday) + " / " + str.tostring(maxTrades), text_color = color.white, text_size = size.small)
+    table.cell(dash, 0, 4, "Setup", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, 4, stTxt, text_color = color.yellow, text_size = size.small)
+    table.cell(dash, 0, 5, "Live pools", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    int live = 0
+    for p in pools
+        if not p.swept
+            live += 1
+    table.cell(dash, 1, 5, str.tostring(live), text_color = color.white, text_size = size.small)
+    if timeframe.in_seconds() > 300
+        table.cell(dash, 0, 6, "Use a 1–5 min chart", text_color = color.red, text_size = size.small)
+        table.merge_cells(dash, 0, 6, 1, 6)
