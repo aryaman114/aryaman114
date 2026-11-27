@@ -1,0 +1,564 @@
+//@version=6
+// =====================================================================================
+//  EMA14 + ICT Silver Bullet (NY AM) for MNQ - TradingView port of the NinjaTrader bot
+// -------------------------------------------------------------------------------------
+//  Same rules and defaults as ninjatrader/Ema14SilverBulletMNQ.cs:
+//    15m EMA14 bias -> 1m liquidity sweep -> MSS (close through swing + EMA14 reclaim +
+//    displacement) -> limit entry in the FVG, only 10:00-11:00 New York time.
+//
+//  How to use:
+//    1. Chart: MNQZ2026 (or MNQ1! for longer history), 1-minute, extended hours ON.
+//    2. Pine Editor -> paste this file -> "Add to chart".
+//    3. Open "Strategy Tester". The table on the chart shows trades/week and the
+//       funded-account numbers (worst day, max drawdown, losing streak).
+//    Note: TradingView's "Total trades" counts each leg (TP1 half + runner) separately;
+//    the on-chart table counts whole setups.
+//
+//  Educational template, not financial advice.
+// =====================================================================================
+strategy("EMA14 Silver Bullet MNQ", shorttitle = "EMA14 SB", overlay = true,
+     pyramiding = 2, initial_capital = 50000,
+     default_qty_type = strategy.fixed, default_qty_value = 1,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5,
+     slippage = 1, backtest_fill_limits_assumption = 1,
+     max_bars_back = 500, process_orders_on_close = false)
+
+// ---------------------------------------------------------------- inputs
+G1 = "1. Session (New York time)"
+iWinStart   = input.int(1000, "Silver Bullet start (HHMM)", minval = 0, maxval = 2359, group = G1)
+iWinEnd     = input.int(1100, "Silver Bullet end (HHMM)", minval = 0, maxval = 2359, group = G1)
+iSweepStart = input.int(930, "Start watching sweeps (HHMM)", minval = 0, maxval = 2359, group = G1)
+iFlatten    = input.int(1200, "Flatten all (HHMM)", minval = 0, maxval = 2359, group = G1)
+iFrom       = input.time(timestamp(2000, 1, 1, 0, 0), "Only trade after", group = G1)
+
+G2 = "2. Bias (15m)"
+iBias     = input.string("HTF EMA", "Bias mode", options = ["Off", "HTF EMA", "HTF EMA + structure"], group = G2)
+iEmaLen   = input.int(14, "EMA period", minval = 2, group = G2)
+iSlope    = input.int(2, "EMA slope lookback (15m bars)", minval = 1, maxval = 20, group = G2)
+iHtfSwing = input.int(2, "15m swing strength", minval = 1, maxval = 10, group = G2)
+
+G3 = "3. ICT entry (1m)"
+iSwing      = input.int(2, "1m swing strength", minval = 1, maxval = 10, group = G3)
+iKeyLevel   = input.bool(false, "Require session-level sweep (ON / opening range / PD)", group = G3)
+iSweepExp   = input.int(20, "Sweep expiry (bars)", minval = 1, group = G3)
+iEmaReclaim = input.bool(true, "MSS must close beyond 1m EMA14", group = G3)
+iDispAtr    = input.float(0.5, "Min MSS candle body (x ATR14)", minval = 0, step = 0.1, group = G3)
+iMinFvg     = input.int(8, "Min FVG size (ticks)", minval = 1, group = G3)
+iFvgWait    = input.int(3, "Bars to wait for FVG after MSS", minval = 0, group = G3)
+iFvgLook    = input.int(15, "FVG search lookback (bars)", minval = 1, maxval = 100, group = G3)
+iEntryMode  = input.string("FVG proximal", "Entry price", options = ["FVG proximal", "FVG midpoint"], group = G3)
+iEntryExp   = input.int(10, "Cancel unfilled entry after (bars)", minval = 1, group = G3)
+
+G4 = "4. Stops and targets"
+iStopMode = input.string("Sweep extreme", "Stop placement", options = ["Sweep extreme", "FVG distal"], group = G4)
+iStopBuf  = input.int(4, "Stop buffer (ticks)", minval = 0, group = G4)
+iMinStop  = input.float(5, "Min stop (points)", minval = 0, group = G4)
+iMaxStop  = input.float(30, "Max stop (points)", minval = 1, group = G4)
+iTgtMode  = input.string("Fixed RR", "Target mode", options = ["Fixed RR", "Liquidity"], group = G4)
+iRR       = input.float(2.0, "Reward:risk (Fixed RR)", minval = 0.5, step = 0.25, group = G4)
+iMinRR    = input.float(1.5, "Min R:R (Liquidity mode)", minval = 0.5, step = 0.25, group = G4)
+iMaxRR    = input.float(4.0, "Max R:R (Liquidity mode)", minval = 0.5, step = 0.25, group = G4)
+iPartial  = input.bool(true, "Take half off at TP1", group = G4)
+iTp1RR    = input.float(1.0, "TP1 (R multiple)", minval = 0, step = 0.25, group = G4)
+iBeR      = input.float(1.0, "Move stop to BE at (R, 0 = off)", minval = 0, step = 0.25, group = G4)
+iBeOff    = input.int(1, "Breakeven offset (ticks)", minval = 0, group = G4)
+
+G5 = "5. Funded account"
+iRisk      = input.float(200, "Risk per trade ($)", minval = 1, group = G5)
+iMaxCt     = input.int(5, "Max contracts", minval = 1, group = G5)
+iMaxTrades = input.int(2, "Max trades per day", minval = 1, group = G5)
+iMaxLosses = input.int(2, "Max losing trades per day", minval = 1, group = G5)
+iStopWin   = input.bool(true, "Stop for the day after a win", group = G5)
+iDayLoss   = input.float(400, "Daily loss limit ($, 0 = off)", minval = 0, group = G5)
+iDayCap    = input.float(800, "Daily profit cap ($, 0 = off)", minval = 0, group = G5)
+iNoTrade   = input.string("", "No-trade dates (yyyy-MM-dd, comma separated)", group = G5)
+
+G6 = "6. Display"
+iShade = input.bool(true, "Shade Silver Bullet window", group = G6)
+iLines = input.bool(true, "Show entry / stop / target lines", group = G6)
+iTable = input.bool(true, "Show stats table", group = G6)
+
+// ---------------------------------------------------------------- constants / helpers
+NY          = "America/New_York"
+RTH_OPEN    = 570    // 09:30
+RTH_CLOSE   = 960    // 16:00
+GLOBEX_OPEN = 1080   // 18:00
+
+hhmm(int v) =>
+    math.floor(v / 100) * 60 + v % 100
+
+winStart  = hhmm(iWinStart)
+winEnd    = hhmm(iWinEnd)
+sweepFrom = hhmm(iSweepStart)
+flatAt    = hhmm(iFlatten)
+
+// 15m EMA14 + 15m market structure, values of the LAST CLOSED 15m bar (no repainting).
+htfData(int len, int slope, int s) =>
+    float e = ta.ema(close, len)
+    var float sh = na
+    var float sl = na
+    var int tr = 0
+    if not na(sh) and close > sh
+        tr := 1
+    else if not na(sl) and close < sl
+        tr := -1
+    if bar_index >= 2 * s
+        bool isH = true
+        bool isL = true
+        for k = 0 to 2 * s
+            if k != s
+                if k < s
+                    if high[k] >= high[s]
+                        isH := false
+                    if low[k] <= low[s]
+                        isL := false
+                else
+                    if high[k] > high[s]
+                        isH := false
+                    if low[k] < low[s]
+                        isL := false
+        if isH
+            sh := high[s]
+        if isL
+            sl := low[s]
+    [close[1], e[1], e[1 + slope], tr[1]]
+
+[htfClose, htfEma, htfEmaPrev, htfTrend] = request.security(syminfo.tickerid, "15", htfData(iEmaLen, iSlope, iHtfSwing), lookahead = barmerge.lookahead_on)
+
+emaEntry = ta.ema(close, iEmaLen)
+atr14    = ta.atr(14)
+
+// Bar CLOSE time in New York (TradingView stamps bars with their open time).
+tod     = hour(time_close, NY) * 60 + minute(time_close, NY)
+dayKey  = year(time_close, NY) * 10000 + month(time_close, NY) * 100 + dayofmonth(time_close, NY)
+weekKey = year(time_close, NY) * 100 + weekofyear(time_close, NY)
+inRange = time >= iFrom
+
+// ---------------------------------------------------------------- session liquidity levels
+var float onHigh  = na
+var float onLow   = na
+var float orHigh  = na
+var float orLow   = na
+var float rthHigh = na
+var float rthLow  = na
+var float pdHigh  = na
+var float pdLow   = na
+var bool  inRth   = false
+var bool  inOn    = false
+
+nowRth = tod > RTH_OPEN and tod <= RTH_CLOSE
+nowOn  = tod > GLOBEX_OPEN or tod <= RTH_OPEN
+if inRth and not nowRth
+    pdHigh := rthHigh
+    pdLow  := rthLow
+if nowOn
+    if not inOn
+        onHigh := high
+        onLow  := low
+    else
+        onHigh := math.max(onHigh, high)
+        onLow  := math.min(onLow, low)
+if nowRth
+    if not inRth
+        rthHigh := high
+        rthLow  := low
+        orHigh  := high
+        orLow   := low
+    else
+        rthHigh := math.max(rthHigh, high)
+        rthLow  := math.min(rthLow, low)
+        if tod <= winStart
+            orHigh := math.max(orHigh, high)
+            orLow  := math.min(orLow, low)
+inRth := nowRth
+inOn  := nowOn
+
+// ---------------------------------------------------------------- daily + stats bookkeeping
+var int   curDay        = 0
+var int   tradesToday   = 0
+var int   winsToday     = 0
+var int   lossesToday   = 0
+var float profitDayStart = 0.0
+var bool  skipToday     = false
+
+var int   stTrades     = 0
+var int   stWins       = 0
+var int   stLosses     = 0
+var float stSumR       = 0.0
+var int   stLossStreak = 0
+var int   stMaxStreak  = 0
+var float stWorstDay   = 0.0
+var float stBestDay    = 0.0
+var int   wkKey        = 0
+var int   wkSetups     = 0
+var int   wkTotal      = 0
+var int   wkHit        = 0
+var float firstInRange = na
+
+if inRange and na(firstInRange)
+    firstInRange := time
+
+if dayKey != curDay
+    if curDay != 0
+        float dPnl = strategy.netprofit - profitDayStart
+        stWorstDay := math.min(stWorstDay, dPnl)
+        stBestDay  := math.max(stBestDay, dPnl)
+    curDay         := dayKey
+    tradesToday    := 0
+    winsToday      := 0
+    lossesToday    := 0
+    profitDayStart := strategy.netprofit
+    int dow = dayofweek(time_close, NY)
+    string dateStr = str.tostring(year(time_close, NY), "0000") + "-" + str.tostring(month(time_close, NY), "00") + "-" + str.tostring(dayofmonth(time_close, NY), "00")
+    skipToday := dow == dayofweek.saturday or dow == dayofweek.sunday or (str.length(iNoTrade) > 0 and str.contains(iNoTrade, dateStr))
+
+if inRange and weekKey != wkKey
+    if wkKey != 0
+        wkTotal += 1
+        if wkSetups >= 3
+            wkHit += 1
+    wkKey    := weekKey
+    wkSetups := 0
+
+// ---------------------------------------------------------------- 1m swing points
+var float swHigh       = na
+var float swLow        = na
+var bool  swHighSwept  = false   // wick traded through (liquidity taken)
+var bool  swLowSwept   = false
+var bool  swHighBroken = false   // a candle CLOSED through (structure broken)
+var bool  swLowBroken  = false
+
+bool sweptLowNow  = false
+bool sweptHighNow = false
+if not na(swLow) and not swLowSwept and low < swLow
+    swLowSwept  := true
+    sweptLowNow := true
+if not na(swHigh) and not swHighSwept and high > swHigh
+    swHighSwept  := true
+    sweptHighNow := true
+
+if bar_index >= 2 * iSwing
+    bool isH = true
+    bool isL = true
+    float hs = high[iSwing]
+    float ls = low[iSwing]
+    for k = 0 to 2 * iSwing
+        if k != iSwing
+            if k < iSwing
+                if high[k] >= hs
+                    isH := false
+                if low[k] <= ls
+                    isL := false
+            else
+                if high[k] > hs
+                    isH := false
+                if low[k] < ls
+                    isL := false
+    if isH
+        swHigh       := hs
+        swHighSwept  := false
+        swHighBroken := false
+    if isL
+        swLow       := ls
+        swLowSwept  := false
+        swLowBroken := false
+
+// ---------------------------------------------------------------- setup helpers
+tookKey(int dir, float price, bool orReady) =>
+    bool r = false
+    if dir > 0
+        r := (not na(onLow) and price < onLow) or (orReady and not na(orLow) and price < orLow) or (not na(pdLow) and price < pdLow)
+    else
+        r := (not na(onHigh) and price > onHigh) or (orReady and not na(orHigh) and price > orHigh) or (not na(pdHigh) and price > pdHigh)
+    r
+
+// Newest unmitigated FVG inside the displacement leg: [found, proximal, distal, barsAgo]
+findFvg(int dir, float sExt, int maxI, float minGap, bool useMid) =>
+    bool  found = false
+    float prox  = na
+    float dist  = na
+    int   at    = -1
+    if maxI >= 0
+        for i = 0 to maxI
+            float p = dir > 0 ? low[i] : high[i]
+            float d = dir > 0 ? high[i + 2] : low[i + 2]
+            bool ok = dir > 0 ? (p - d >= minGap and d > sExt) : (d - p >= minGap and d < sExt)
+            if ok
+                float e = useMid ? (p + d) / 2 : p
+                bool mitig = false
+                if i > 0
+                    for j = 0 to i - 1
+                        if (dir > 0 and low[j] <= e) or (dir < 0 and high[j] >= e)
+                            mitig := true
+                            break
+                if not mitig
+                    found := true
+                    prox  := p
+                    dist  := d
+                    at    := i
+                    break
+    [found, prox, dist, at]
+
+computeTarget(int dir, float entry, float risk) =>
+    float result = entry + dir * iRR * risk
+    if iTgtMode == "Liquidity"
+        float best = na
+        array<float> pools = dir > 0 ? array.from(orHigh, onHigh, pdHigh, rthHigh, swHigh) : array.from(orLow, onLow, pdLow, rthLow, swLow)
+        for p in pools
+            if not na(p)
+                float d = dir * (p - entry)
+                if d >= iMinRR * risk and (na(best) or d < dir * (best - entry))
+                    best := p
+        if not na(best)
+            float d2 = math.min(dir * (best - entry) - syminfo.mintick, iMaxRR * risk)
+            result := entry + dir * d2
+    math.round_to_mintick(result)
+
+// ---------------------------------------------------------------- strategy state
+var int   phase         = 0      // 0 idle, 1 swept, 2 waiting FVG, 3 order working, 4 in trade
+var int   setupDir      = 0
+var float sweepExt      = na
+var int   sweepBar      = 0
+var bool  keySwept      = false
+var int   mssBar        = 0
+var int   tradeDir      = 0
+var float pEntry        = na
+var float pStop         = na
+var float pTarget       = na
+var float pTp1          = na
+var float pRisk         = na
+var int   q1Planned     = 0
+var int   q2Planned     = 0
+var int   orderBar      = 0
+var bool  orderWorking  = false
+var bool  entryFilled   = false
+var bool  movedBE       = false
+var float profitAtEntry = 0.0
+var int   tcAtOrder     = 0
+
+bool evSweepL = false
+bool evSweepS = false
+bool evMssL   = false
+bool evMssS   = false
+
+inWindow    = tod > winStart and tod < winEnd
+inSweepTime = tod > sweepFrom and tod < winEnd
+orReady     = tod > winStart
+ready       = bar_index >= 30 and not na(htfEmaPrev)
+
+allowLong  = iBias == "Off" or (htfClose > htfEma and htfEma > htfEmaPrev and (iBias == "HTF EMA" or htfTrend == 1))
+allowShort = iBias == "Off" or (htfClose < htfEma and htfEma < htfEmaPrev and (iBias == "HTF EMA" or htfTrend == -1))
+
+if ready
+    // ---- detect entry fills (both legs share one limit price)
+    int tcNow = strategy.closedtrades + strategy.opentrades
+    if orderWorking and tcNow > tcAtOrder
+        entryFilled  := true
+        orderWorking := false
+        phase        := 4
+
+    // ---- 1. book a finished trade
+    if entryFilled and strategy.position_size == 0
+        float pnl = strategy.netprofit - profitAtEntry
+        tradesToday += 1
+        stTrades    += 1
+        wkSetups    += 1
+        if pnl > 0
+            winsToday    += 1
+            stWins       += 1
+            stLossStreak := 0
+        else if pnl < 0
+            lossesToday  += 1
+            stLosses     += 1
+            stLossStreak += 1
+            stMaxStreak  := math.max(stMaxStreak, stLossStreak)
+        stSumR      += pnl / (pRisk * syminfo.pointvalue * (q1Planned + q2Planned))
+        entryFilled := false
+        phase       := 0
+        setupDir    := 0
+
+    if tod >= flatAt and tod < GLOBEX_OPEN
+        // ---- 2. hard time exit
+        if orderWorking
+            strategy.cancel("SB1")
+            strategy.cancel("SB2")
+            orderWorking := false
+        if strategy.position_size != 0
+            strategy.close_all(comment = "Time exit")
+        if not entryFilled
+            phase    := 0
+            setupDir := 0
+    else
+        // ---- 3. manage working entry / open trade
+        if orderWorking
+            bool expired    = bar_index - orderBar >= iEntryExp
+            bool winOver    = tod >= winEnd
+            bool ranTgt     = tradeDir > 0 ? high >= pTarget : low <= pTarget
+            bool beyondStop = tradeDir > 0 ? close < pStop : close > pStop
+            if expired or winOver or ranTgt or beyondStop
+                strategy.cancel("SB1")
+                strategy.cancel("SB2")
+                orderWorking := false
+                phase        := 0
+                setupDir     := 0
+
+        if entryFilled and strategy.position_size != 0 and not movedBE
+            bool  tp1Done = q1Planned > 0 and math.abs(strategy.position_size) <= q2Planned
+            float trig    = pEntry + tradeDir * iBeR * pRisk
+            bool  reached = iBeR > 0 and (tradeDir > 0 ? high >= trig : low <= trig)
+            float be      = math.round_to_mintick(pEntry + tradeDir * iBeOff * syminfo.mintick)
+            bool  safe    = tradeDir > 0 ? close > be + 2 * syminfo.mintick : close < be - 2 * syminfo.mintick
+            if tp1Done or (reached and safe)
+                strategy.exit("X2", "SB2", stop = be, limit = pTarget, comment_loss = "BE", comment_profit = "Target")
+                if q1Planned > 0
+                    strategy.exit("X1", "SB1", stop = be, limit = pTp1, comment_loss = "BE", comment_profit = "TP1")
+                movedBE := true
+
+        // ---- 4. look for a new setup
+        float dayPnl  = strategy.netprofit - profitDayStart
+        bool  flatNow = strategy.position_size == 0 and not orderWorking and not entryFilled
+        bool  limitsOk = tradesToday < iMaxTrades and lossesToday < iMaxLosses and not (iStopWin and winsToday > 0)
+        bool  moneyOk = not (iDayLoss > 0 and dayPnl <= -iDayLoss) and not (iDayCap > 0 and dayPnl >= iDayCap)
+        bool  canArm  = not skipToday and flatNow and limitsOk and moneyOk
+
+        if phase == 0 and inSweepTime and inRange and canArm
+            setupDir := 0
+            if allowLong and sweptLowNow
+                setupDir := 1
+                sweepExt := low
+                evSweepL := true
+            else if allowShort and sweptHighNow
+                setupDir := -1
+                sweepExt := high
+                evSweepS := true
+            if setupDir != 0
+                sweepBar := bar_index
+                keySwept := tookKey(setupDir, sweepExt, orReady)
+                phase    := 1
+
+        // ---- sweep -> market structure shift
+        if phase == 1
+            sweepExt := setupDir > 0 ? math.min(sweepExt, low) : math.max(sweepExt, high)
+            if not keySwept
+                keySwept := tookKey(setupDir, sweepExt, orReady)
+            if bar_index - sweepBar > iSweepExp
+                phase    := 0
+                setupDir := 0
+            else if (setupDir > 0 and not allowLong) or (setupDir < 0 and not allowShort)
+                phase    := 0
+                setupDir := 0
+            else if inWindow
+                float structure = setupDir > 0 ? swHigh : swLow
+                bool  intact    = setupDir > 0 ? not swHighBroken : not swLowBroken
+                bool  valid     = not na(structure) and intact and (setupDir > 0 ? structure > sweepExt : structure < sweepExt)
+                if valid
+                    bool broke = setupDir > 0 ? close > structure : close < structure
+                    bool emaOk = not iEmaReclaim or (setupDir > 0 ? close > emaEntry : close < emaEntry)
+                    bool disp  = setupDir * (close - open) >= iDispAtr * atr14
+                    bool keyOk = not iKeyLevel or keySwept
+                    if broke and emaOk and disp and keyOk
+                        phase  := 2
+                        mssBar := bar_index
+                        if setupDir > 0
+                            evMssL := true
+                        else
+                            evMssS := true
+
+        // ---- MSS -> FVG -> limit order
+        if phase == 2
+            bool invalid = setupDir > 0 ? low < sweepExt : high > sweepExt
+            if invalid or bar_index - mssBar > iFvgWait or not inWindow
+                phase    := 0
+                setupDir := 0
+            else
+                int maxI = math.min(bar_index - sweepBar - 2, iFvgLook)
+                [found, prox, dist, at] = findFvg(setupDir, sweepExt, maxI, iMinFvg * syminfo.mintick, iEntryMode == "FVG midpoint")
+                if found
+                    float entry   = math.round_to_mintick(iEntryMode == "FVG midpoint" ? (prox + dist) / 2 : prox)
+                    float stopRef = iStopMode == "Sweep extreme" ? sweepExt : dist
+                    float stopPx  = math.round_to_mintick(stopRef - setupDir * iStopBuf * syminfo.mintick)
+                    float risk    = setupDir * (entry - stopPx)
+                    if risk < iMinStop or risk > iMaxStop
+                        phase    := 0
+                        setupDir := 0
+                    else
+                        float target = computeTarget(setupDir, entry, risk)
+                        float tp1    = math.round_to_mintick(entry + setupDir * iTp1RR * risk)
+                        int   qty    = math.min(int(math.floor(iRisk / (risk * syminfo.pointvalue))), iMaxCt)
+                        if qty < 1
+                            phase    := 0
+                            setupDir := 0
+                        else
+                            int q1 = iPartial and qty >= 2 and iTp1RR > 0 ? int(math.floor(qty / 2)) : 0
+                            int q2 = qty - q1
+                            tradeDir      := setupDir
+                            pEntry        := entry
+                            pStop         := stopPx
+                            pTarget       := target
+                            pTp1          := tp1
+                            pRisk         := risk
+                            q1Planned     := q1
+                            q2Planned     := q2
+                            orderBar      := bar_index
+                            movedBE       := false
+                            profitAtEntry := strategy.netprofit
+                            tcAtOrder     := strategy.closedtrades + strategy.opentrades
+                            dirArg = setupDir > 0 ? strategy.long : strategy.short
+                            if q1 > 0
+                                strategy.entry("SB1", dirArg, qty = q1, limit = entry)
+                                strategy.exit("X1", "SB1", stop = stopPx, limit = tp1, comment_loss = "Stop", comment_profit = "TP1")
+                            strategy.entry("SB2", dirArg, qty = q2, limit = entry)
+                            strategy.exit("X2", "SB2", stop = stopPx, limit = target, comment_loss = "Stop", comment_profit = "Target")
+                            orderWorking := true
+                            phase        := 3
+
+// ---- mark swing levels that a candle body closed through (after the setup logic)
+if not na(swHigh) and close > swHigh
+    swHighBroken := true
+if not na(swLow) and close < swLow
+    swLowBroken := true
+
+// ---------------------------------------------------------------- visuals
+plot(emaEntry, "EMA14 (1m)", color = color.orange)
+showLines = iLines and (orderWorking or strategy.position_size != 0)
+plot(showLines ? pEntry : na, "Entry", color = color.blue, style = plot.style_linebr)
+plot(showLines ? pStop : na, "Stop", color = color.red, style = plot.style_linebr)
+plot(showLines ? pTarget : na, "Target", color = color.green, style = plot.style_linebr)
+plotshape(evSweepL, title = "Sell-side sweep", style = shape.triangleup, location = location.belowbar, color = color.lime, size = size.tiny)
+plotshape(evSweepS, title = "Buy-side sweep", style = shape.triangledown, location = location.abovebar, color = color.red, size = size.tiny)
+plotshape(evMssL, title = "Bullish MSS", style = shape.labelup, location = location.belowbar, color = color.lime, text = "MSS", textcolor = color.black, size = size.tiny)
+plotshape(evMssS, title = "Bearish MSS", style = shape.labeldown, location = location.abovebar, color = color.red, text = "MSS", textcolor = color.white, size = size.tiny)
+bgcolor(iShade and tod > winStart and tod <= winEnd ? color.new(color.blue, 90) : na, title = "Silver Bullet window")
+
+// ---------------------------------------------------------------- stats table
+var table tb = table.new(position.top_right, 2, 11, bgcolor = color.new(color.black, 15), border_width = 1, border_color = color.gray)
+if iTable and barstate.islast
+    int   weeksAll = wkTotal + 1
+    int   hitAll   = wkHit + (wkSetups >= 3 ? 1 : 0)
+    float perWeek  = weeksAll > 0 ? float(stTrades) / weeksAll : 0.0
+    float lastDay  = strategy.netprofit - profitDayStart
+    float worstDay = math.min(stWorstDay, lastDay)
+    float bestDay  = math.max(stBestDay, lastDay)
+    int   beCount  = stTrades - stWins - stLosses
+    table.cell(tb, 0, 0, "EMA14 Silver Bullet", text_color = color.white, text_size = size.small)
+    table.cell(tb, 1, 0, syminfo.ticker, text_color = color.white, text_size = size.small)
+    table.cell(tb, 0, 1, "Weeks tested", text_color = color.silver, text_size = size.small)
+    table.cell(tb, 1, 1, str.tostring(weeksAll), text_color = color.white, text_size = size.small)
+    table.cell(tb, 0, 2, "Trades (setups)", text_color = color.silver, text_size = size.small)
+    table.cell(tb, 1, 2, str.tostring(stTrades), text_color = color.white, text_size = size.small)
+    table.cell(tb, 0, 3, "Trades / week", text_color = color.silver, text_size = size.small)
+    table.cell(tb, 1, 3, str.tostring(perWeek, "0.0"), text_color = perWeek >= 3 ? color.lime : color.orange, text_size = size.small)
+    table.cell(tb, 0, 4, "Weeks with 3+ trades", text_color = color.silver, text_size = size.small)
+    table.cell(tb, 1, 4, str.tostring(hitAll) + " / " + str.tostring(weeksAll), text_color = color.white, text_size = size.small)
+    table.cell(tb, 0, 5, "Win / loss / BE", text_color = color.silver, text_size = size.small)
+    table.cell(tb, 1, 5, str.tostring(stWins) + " / " + str.tostring(stLosses) + " / " + str.tostring(beCount), text_color = color.white, text_size = size.small)
+    table.cell(tb, 0, 6, "Avg R per trade", text_color = color.silver, text_size = size.small)
+    table.cell(tb, 1, 6, stTrades > 0 ? str.tostring(stSumR / stTrades, "0.00") : "-", text_color = stSumR >= 0 ? color.lime : color.red, text_size = size.small)
+    table.cell(tb, 0, 7, "Net profit", text_color = color.silver, text_size = size.small)
+    table.cell(tb, 1, 7, "$" + str.tostring(strategy.netprofit, "#,##0"), text_color = strategy.netprofit >= 0 ? color.lime : color.red, text_size = size.small)
+    table.cell(tb, 0, 8, "Max drawdown", text_color = color.silver, text_size = size.small)
+    table.cell(tb, 1, 8, "$" + str.tostring(strategy.max_drawdown, "#,##0"), text_color = color.white, text_size = size.small)
+    table.cell(tb, 0, 9, "Worst / best day", text_color = color.silver, text_size = size.small)
+    table.cell(tb, 1, 9, "$" + str.tostring(worstDay, "#,##0") + " / $" + str.tostring(bestDay, "#,##0"), text_color = color.white, text_size = size.small)
+    table.cell(tb, 0, 10, "Max losing streak", text_color = color.silver, text_size = size.small)
+    table.cell(tb, 1, 10, str.tostring(stMaxStreak), text_color = color.white, text_size = size.small)
