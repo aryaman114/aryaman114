@@ -7,8 +7,10 @@
 // 1. Range candle : the 4H candle that starts at your time box (wicks included).
 // 2. Sweep candle : the next 4H candle must trade beyond ONE end of the range and close back inside.
 //                   High swept -> SELL (target range low). Low swept -> BUY (target range high).
-// 3. Entry candle : the 4H candle after the sweep. On the chart timeframe wait for an MSS, then a
-//                   limit order at the FVG midpoint or the breaker block 0.5 level.
+// 3. Entry candle : the 4H candle after the sweep. On the chart timeframe:
+//                   MSS level = first 3-candle swing to the LEFT of the sweep point; a close beyond it = MSS.
+//                   Entry = limit at the breaker block 0.5 level (priority). If there is no valid breaker,
+//                   the midpoint of the FIRST FVG of the sweep -> MSS leg (premium half sells / discount half buys).
 // 4. Stop loss    : previous 4H candle (the sweep candle) high for sells / low for buys.
 // 5. Lots         : 2 lots if total risk <= $300 (lot 1 at 50% of range, lot 2 at opposite end,
 //                   lot 2 to breakeven after lot 1 books). Else 1 lot if risk <= $215 (target opposite
@@ -32,10 +34,8 @@ string startAmPm   = input.string("AM", "", options = ["AM", "PM"], group = G1, 
 bool   onlyTimeBox = input.bool(true, "Only the time-box candle", group = G1, tooltip = "On: only the 4H candle that starts at the time box can be a range candle. Off: every 4H candle (grid anchored at the time box) is checked.")
 
 G2 = "2. LTF Entry (MSS + FVG / Breaker)"
-int    swingN       = input.int(2, "Swing strength (bars each side)", minval = 1, maxval = 10, group = G2)
-string mssMode      = input.string("Strict shift", "MSS mode", options = ["Strict shift", "Any break"], group = G2, tooltip = "Strict shift: the break must flip structure (bullish -> bearish for sells). Any break: any close beyond the last swing counts.")
-string entryModel   = input.string("FVG or Breaker", "Entry model", options = ["FVG or Breaker", "FVG only", "Breaker only"], group = G2)
-string entryPref    = input.string("Nearest to price", "If FVG and breaker are both valid", options = ["Nearest to price", "Best price"], group = G2, tooltip = "Nearest to price: the level price reaches first on the pullback. Best price: the level closer to the stop (smaller risk, fills less often).")
+int    swingN       = input.int(1, "Swing strength (bars each side)", minval = 1, maxval = 10, group = G2, tooltip = "1 = 3-candle swing. The MSS level is the first swing to the left of the sweep point.")
+string entryModel   = input.string("FVG or Breaker", "Entry model", options = ["FVG or Breaker", "FVG only", "Breaker only"], group = G2, tooltip = "FVG or Breaker: breaker block 0.5 level; if there is no valid breaker, the midpoint of the first FVG.")
 int    minFvgTicks  = input.int(2, "Min FVG size (ticks)", minval = 1, group = G2)
 int    stopBufTicks = input.int(0, "Stop buffer (ticks)", minval = 0, group = G2)
 
@@ -50,6 +50,10 @@ G4 = "4. Session / Display"
 bool   flattenWeekend = input.bool(true, "Flatten before weekend (Fri 4:45 PM New York)", group = G4)
 bool   showDraw       = input.bool(true, "Show drawings", group = G4)
 bool   showTable      = input.bool(true, "Show status table", group = G4)
+color  rangeLineCol   = input.color(color.blue, "CRT range box", group = G4, inline = "rb")
+color  rangeFillCol   = input.color(color.new(color.blue, 90), "fill", group = G4, inline = "rb")
+color  sweepLineCol   = input.color(color.orange, "Sweep candle box", group = G4, inline = "sb")
+color  sweepFillCol   = input.color(color.new(color.orange, 90), "fill", group = G4, inline = "sb")
 
 // ═════════════════════════════ Constants ═════════════════════════════
 string NY          = "America/New_York"
@@ -88,6 +92,11 @@ type Setup
     float  finalTgt
     int    winStart = 0
     int    winEnd = 0
+    int    sweepStartT = 0
+    int    sweepEndT = 0
+    int    anchorBar = -1
+    int    swingBar = -1
+    float  mssLvl
     int    mssBar = -1
     int    legBar = -1
     float  legExt
@@ -146,7 +155,8 @@ evalEntry(Setup s, float top, float bot) =>
         why := "risk $" + str.tostring(rpl, "#.##") + " per lot > max $" + str.tostring(maxRisk1, "#.##")
     [lots, entry, t1, t2, rpl, why]
 
-// Most recent unmitigated FVG in the MSS leg (or formed after it) that passes the entry checks.
+// FIRST FVG of the sweep -> MSS leg, in its premium half (sell) / discount half (buy).
+// FVGs whose middle candle is at most one bar after the MSS candle count (same displacement).
 findFvg(Setup s, bool enabled) =>
     bool  ok     = false
     int   eLots  = 0
@@ -157,33 +167,122 @@ findFvg(Setup s, bool enabled) =>
     float zTop   = na
     float zBot   = na
     int   zFirst = -1
-    float runExt = na     // highest high (sell) / lowest low (buy) of the bars after the FVG
-    int maxOff = math.min(bar_index - (s.legBar + 2), MAX_SCAN)
-    if enabled and maxOff >= 0
-        for off = 0 to maxOff
-            float top = s.dir < 0 ? low[off + 2] : low[off]
-            float bot = s.dir < 0 ? high[off] : high[off + 2]
-            if top - bot >= minFvgTicks * tick - tick * 0.01
-                float mid = (top + bot) / 2
-                bool mitigated = na(runExt) ? false : (s.dir < 0 ? runExt >= mid : runExt <= mid)
-                if not mitigated
-                    [lots, entry, t1, t2, rpl, why] = evalEntry(s, top, bot)
-                    if lots > 0
-                        ok     := true
-                        eLots  := lots
-                        eEntry := entry
-                        eT1    := t1
-                        eT2    := t2
-                        eRisk  := rpl
-                        zTop   := top
-                        zBot   := bot
-                        zFirst := bar_index - off - 2
-                        break
-                    else if bar_index - off > s.lastFvgLogged
-                        s.lastFvgLogged := bar_index - off
+    if enabled and s.anchorBar >= 0 and s.mssBar >= 0
+        int hiOff = math.min(bar_index - (s.anchorBar + 2), MAX_SCAN)   // oldest FVG (third candle)
+        int loOff = math.max(0, bar_index - (s.mssBar + 2))             // newest FVG allowed
+        if hiOff >= loOff
+            float legMid = (s.legExt + s.mssLvl) / 2
+            // after[off] = highest high (sell) / lowest low (buy) of the candles newer than `off`
+            float[] after = array.new_float(hiOff + 1, na)
+            float run = na
+            for off = 0 to hiOff
+                array.set(after, off, run)
+                float v = s.dir < 0 ? high[off] : low[off]
+                run := na(run) ? v : (s.dir < 0 ? math.max(run, v) : math.min(run, v))
+            for t = 0 to hiOff - loOff
+                int fo = hiOff - t          // oldest first -> the FIRST FVG wins
+                float top = s.dir < 0 ? low[fo + 2] : low[fo]
+                float bot = s.dir < 0 ? high[fo] : high[fo + 2]
+                if top - bot >= minFvgTicks * tick - tick * 0.01
+                    float mid = (top + bot) / 2
+                    string why = ""
+                    if (s.dir < 0 and mid <= legMid) or (s.dir > 0 and mid >= legMid)
+                        why := "not in the " + (s.dir < 0 ? "premium" : "discount") + " half of the sweep -> MSS leg"
+                    else
+                        float ext = array.get(after, fo)
+                        bool mitigated = na(ext) ? false : (s.dir < 0 ? ext >= mid : ext <= mid)
+                        if mitigated
+                            why := "price already came back to its midpoint"
+                        else
+                            [lots, entry, t1, t2, rpl, why2] = evalEntry(s, top, bot)
+                            if lots > 0
+                                ok     := true
+                                eLots  := lots
+                                eEntry := entry
+                                eT1    := t1
+                                eT2    := t2
+                                eRisk  := rpl
+                                zTop   := top
+                                zBot   := bot
+                                zFirst := bar_index - fo - 2
+                                break
+                            why := why2
+                    if bar_index - fo > s.lastFvgLogged
+                        s.lastFvgLogged := bar_index - fo
                         log.info("{0}: FVG {1}-{2} skipped: {3}", s.id, fmt(bot), fmt(top), why)
-            runExt := s.dir < 0 ? (na(runExt) ? high[off] : math.max(runExt, high[off])) : (na(runExt) ? low[off] : math.min(runExt, low[off]))
     [ok, eLots, eEntry, eT1, eT2, eRisk, zTop, zBot, zFirst]
+
+// Sweep point = the chart candle that made the sweep candle's high (sell) / low (buy).
+// MSS level   = the FIRST swing low (sell) / swing high (buy) to the LEFT of the sweep point.
+markMssLevel(Setup s) =>
+    int   aOff = -1
+    float aExt = na
+    for off = 1 to MAX_SCAN
+        if time[off] < s.sweepStartT
+            break
+        if time[off] < s.sweepEndT
+            float v = s.dir < 0 ? high[off] : low[off]
+            if aOff < 0 or (s.dir < 0 ? v > aExt : v < aExt)    // ties keep the latest candle
+                aOff := off
+                aExt := v
+    bool found = false
+    if aOff > 0 and aOff + swingN <= MAX_SCAN
+        for off = aOff + swingN to MAX_SCAN
+            bool isSw = true
+            for k = 1 to swingN
+                if s.dir < 0
+                    if low[off + k] <= low[off] or low[off - k] < low[off]
+                        isSw := false
+                else
+                    if high[off + k] >= high[off] or high[off - k] > high[off]
+                        isSw := false
+            if isSw
+                s.anchorBar := bar_index - aOff
+                s.legBar    := s.anchorBar
+                s.legExt    := aExt
+                s.swingBar  := bar_index - off
+                s.mssLvl    := s.dir < 0 ? low[off] : high[off]
+                found := true
+                break
+    if found
+        log.info("{0}: sweep point {1}. MSS level = first swing {2} to its left: {3}", s.id, fmt(s.legExt), s.dir < 0 ? "low" : "high", fmt(s.mssLvl))
+        if showDraw
+            line.new(s.swingBar, s.mssLvl, s.anchorBar, s.mssLvl, color = color.fuchsia, style = line.style_dashed)
+    found
+
+// MSS confirmed on the candle `mssOff` bars ago: find the breaker block and mark the MSS.
+confirmMss(Setup s, int mssOff) =>
+    s.mssBar      := bar_index - mssOff
+    s.state       := 3
+    s.bbBar       := -1
+    s.bbMitigated := false
+    s.bbLogged    := false
+    // breaker block = last opposite-colour candle at/before the broken swing
+    int swOff = bar_index - s.swingBar
+    if swOff + BB_LOOKBACK <= MAX_SCAN
+        for k = 0 to BB_LOOKBACK
+            int bo = swOff + k
+            bool opposite = s.dir < 0 ? close[bo] < open[bo] : close[bo] > open[bo]
+            if opposite
+                s.bbBar := bar_index - bo
+                s.bbTop := high[bo]
+                s.bbBot := low[bo]
+                break
+    // breaker 0.5 already traded between the MSS candle and now?
+    if s.bbBar >= 0 and mssOff > 0
+        float half = (s.bbTop + s.bbBot) / 2
+        for off = 0 to mssOff - 1
+            if (s.dir < 0 and high[off] >= half) or (s.dir > 0 and low[off] <= half)
+                s.bbMitigated := true
+                break
+    string bbTxt = s.bbBar >= 0 ? "Breaker block " + fmt(s.bbBot) + "-" + fmt(s.bbTop) + " (0.5 = " + fmt(math.round_to_mintick((s.bbTop + s.bbBot) / 2)) + ")" : "No breaker candle found"
+    log.info("{0}: {1} MSS confirmed - close {2} beyond {3}. {4}", s.id, s.dir < 0 ? "bearish" : "bullish", fmt(close[mssOff]), fmt(s.mssLvl), bbTxt)
+    if showDraw
+        line.new(s.swingBar, s.mssLvl, s.mssBar, s.mssLvl, color = color.fuchsia, width = 2)
+        label.new(s.mssBar, s.mssLvl, "MSS", color = color.new(color.fuchsia, 100), textcolor = color.fuchsia, style = s.dir < 0 ? label.style_label_up : label.style_label_down, size = size.small)
+        if s.bbBar >= 0
+            box.new(s.bbBar, s.bbTop, s.mssBar, s.bbBot, border_color = color.purple, bgcolor = color.new(color.purple, 80))
+    true
 
 // Breaker block found at the MSS, unless price already came back to its 0.5 level.
 breakerEntry(Setup s, bool enabled) =>
@@ -236,14 +335,16 @@ evaluateCrt(Candle rng, Candle swp, int num) =>
                 res.sweepExt := d < 0 ? swp.h : swp.l
                 res.stopPx   := math.round_to_mintick(d < 0 ? swp.h + stopBufTicks * tick : swp.l - stopBufTicks * tick)
                 res.finalTgt := d < 0 ? rng.l : rng.h
+                res.sweepStartT := swp.startT
+                res.sweepEndT   := swp.endT
                 log.info("{0}: {1} CRT confirmed. {2}. 50% = {3}, stop = {4}, final target = {5}", res.id, dirName(d), lbl, fmt(res.rMid), fmt(res.stopPx), fmt(res.finalTgt))
                 if showDraw
-                    box.new(rng.firstBar, rng.h, rng.lastBar, rng.l, border_color = color.new(color.blue, 30), bgcolor = color.new(color.blue, 90))
-                    box.new(swp.firstBar, swp.h, swp.lastBar, swp.l, border_color = color.new(color.orange, 30), bgcolor = color.new(color.orange, 90))
-                    label.new(swp.firstBar, d < 0 ? swp.h : swp.l, (d < 0 ? "CRT SELL " : "CRT BUY ") + res.id, color = color.orange, textcolor = color.white, style = d < 0 ? label.style_label_down : label.style_label_up, size = size.small)
+                    box.new(rng.firstBar, rng.h, rng.lastBar, rng.l, border_color = rangeLineCol, bgcolor = rangeFillCol)
+                    box.new(swp.firstBar, swp.h, swp.lastBar, swp.l, border_color = sweepLineCol, bgcolor = sweepFillCol)
+                    label.new(swp.firstBar, d < 0 ? swp.h : swp.l, (d < 0 ? "CRT SELL " : "CRT BUY ") + res.id, color = sweepLineCol, textcolor = color.white, style = d < 0 ? label.style_label_down : label.style_label_up, size = size.small)
                     int x2 = swp.endT + HTF_MS
-                    line.new(rng.startT, rng.h, x2, rng.h, xloc = xloc.bar_time, color = color.blue)
-                    line.new(rng.startT, rng.l, x2, rng.l, xloc = xloc.bar_time, color = color.blue)
+                    line.new(rng.startT, rng.h, x2, rng.h, xloc = xloc.bar_time, color = rangeLineCol)
+                    line.new(rng.startT, rng.l, x2, rng.l, xloc = xloc.bar_time, color = rangeLineCol)
                     line.new(rng.startT, res.rMid, x2, res.rMid, xloc = xloc.bar_time, color = color.gray, style = line.style_dashed)
     res
 
@@ -258,46 +359,6 @@ int  nyMinClose    = hour(time_close, NY) * 60 + minute(time_close, NY)
 bool weekendCut    = flattenWeekend and nyDow == dayofweek.friday and nyMinClose >= 16 * 60 + 45
 bool lastOfSession = session.islastbar
 bool badTf         = not timeframe.isminutes or (timeframe.multiplier != 5 and timeframe.multiplier != 15)
-
-// ═════════════════════════════ LTF market structure ═════════════════════════════
-float ph = ta.pivothigh(high, swingN, swingN)
-float pl = ta.pivotlow(low, swingN, swingN)
-
-var float swHigh       = na
-var int   swHighBar    = na
-var bool  swHighBroken = true
-var float swLow        = na
-var int   swLowBar     = na
-var bool  swLowBroken  = true
-var int   structure    = 0      // +1 bullish, -1 bearish, 0 unknown
-
-if not na(ph)
-    swHigh       := ph
-    swHighBar    := bar_index - swingN
-    swHighBroken := false
-if not na(pl)
-    swLow       := pl
-    swLowBar    := bar_index - swingN
-    swLowBroken := false
-
-int   breakDir   = 0
-bool  breakShift = false
-float breakLvl   = na
-int   breakBar   = na
-if not swLowBroken and close < swLow
-    swLowBroken := true
-    breakDir    := -1
-    breakShift  := structure != -1
-    breakLvl    := swLow
-    breakBar    := swLowBar
-    structure   := -1
-else if not swHighBroken and close > swHigh
-    swHighBroken := true
-    breakDir     := 1
-    breakShift   := structure != 1
-    breakLvl     := swHigh
-    breakBar     := swHighBar
-    structure    := 1
 
 // ═════════════════════════════ State ═════════════════════════════
 var Candle cur        = na
@@ -388,7 +449,7 @@ if newWin
         pend.winStart := winStart
         pend.winEnd   := winEnd
         pend.state    := 2
-        log.info("{0}: entry window open - waiting for LTF MSS", pend.id)
+        log.info("{0}: entry window open - marking the MSS level", pend.id)
 else
     cur.h       := math.max(cur.h, high)
     cur.l       := math.min(cur.l, low)
@@ -403,10 +464,20 @@ if (pend.state == 2 or pend.state == 3) and time >= pend.winStart and time < pen
         log.info("{0}: price traded beyond the sweep candle {1} before entry - setup cancelled", pend.id, pend.dir < 0 ? "high" : "low")
         pend.state := 0
     else
-        // a new extreme beyond the MSS leg cancels that MSS -> wait for a fresh one
-        if pend.state == 3 and ((pend.dir < 0 and high > pend.legExt) or (pend.dir > 0 and low < pend.legExt))
-            pend.state := 2
-            log.info("{0}: new extreme beyond the MSS leg - waiting for a new MSS", pend.id)
+        // first bar of the entry candle: mark the sweep point and the MSS level (first swing to its left)
+        if pend.state == 2 and pend.anchorBar < 0
+            if not markMssLevel(pend)
+                log.info("{0}: no swing found to the left of the sweep - setup skipped", pend.id)
+                pend.state := 0
+            else
+                // the MSS may already have printed after the sweep, inside the sweep candle
+                int aOff = bar_index - pend.anchorBar
+                if aOff >= 2
+                    for t = 1 to aOff - 1
+                        int co = aOff - t
+                        if (pend.dir < 0 and close[co] < pend.mssLvl) or (pend.dir > 0 and close[co] > pend.mssLvl)
+                            confirmMss(pend, co)
+                            break
 
         // breaker 0.5 traded after the MSS bar -> breaker used up
         if pend.state == 3 and pend.bbBar >= 0 and bar_index > pend.mssBar
@@ -414,41 +485,9 @@ if (pend.state == 2 or pend.state == 3) and time >= pend.winStart and time < pen
             if (pend.dir < 0 and high >= half) or (pend.dir > 0 and low <= half)
                 pend.bbMitigated := true
 
-        // MSS
-        if pend.state == 2 and breakDir == pend.dir and (mssMode == "Any break" or breakShift)
-            int startOff = math.min(bar_index - breakBar, MAX_SCAN)
-            pend.mssBar := bar_index
-            pend.legBar := bar_index - startOff
-            pend.legExt := pend.dir < 0 ? high[startOff] : low[startOff]
-            for off = 0 to startOff
-                float v = pend.dir < 0 ? high[off] : low[off]
-                if (pend.dir < 0 and v > pend.legExt) or (pend.dir > 0 and v < pend.legExt)
-                    pend.legExt := v
-                    pend.legBar := bar_index - off
-
-            // breaker block = last opposite-colour candle at/before the broken swing
-            pend.bbBar       := -1
-            pend.bbMitigated := false
-            pend.bbLogged    := false
-            int swOff = bar_index - breakBar
-            if swOff + BB_LOOKBACK <= MAX_SCAN
-                for k = 0 to BB_LOOKBACK
-                    int bo = swOff + k
-                    bool opposite = pend.dir < 0 ? close[bo] < open[bo] : close[bo] > open[bo]
-                    if opposite
-                        pend.bbBar := bar_index - bo
-                        pend.bbTop := high[bo]
-                        pend.bbBot := low[bo]
-                        break
-
-            pend.state := 3
-            string bbTxt = pend.bbBar >= 0 ? "Breaker block " + fmt(pend.bbBot) + "-" + fmt(pend.bbTop) + " (0.5 = " + fmt(math.round_to_mintick((pend.bbTop + pend.bbBot) / 2)) + ")" : "No breaker candle found"
-            log.info("{0}: {1} MSS confirmed - close {2} beyond swing {3}. Leg extreme {4}. {5}", pend.id, pend.dir < 0 ? "bearish" : "bullish", fmt(close), fmt(breakLvl), fmt(pend.legExt), bbTxt)
-            if showDraw
-                line.new(breakBar, breakLvl, bar_index, breakLvl, color = color.fuchsia, width = 2)
-                label.new(bar_index, breakLvl, "MSS", color = color.new(color.fuchsia, 100), textcolor = color.fuchsia, style = pend.dir < 0 ? label.style_label_up : label.style_label_down, size = size.small)
-                if pend.bbBar >= 0
-                    box.new(pend.bbBar, pend.bbTop, bar_index, pend.bbBot, border_color = color.purple, bgcolor = color.new(color.purple, 80))
+        // MSS on this candle: close beyond the swing left of the sweep
+        if pend.state == 2 and pend.anchorBar >= 0 and ((pend.dir < 0 and close < pend.mssLvl) or (pend.dir > 0 and close > pend.mssLvl))
+            confirmMss(pend, 0)
 
         // entry
         if pend.state == 3 and canPlace
@@ -457,13 +496,10 @@ if (pend.state == 2 or pend.state == 3) and time >= pend.winStart and time < pen
                     pend.busyLogged := true
                     log.info("{0}: entry waiting - another CRT trade is still active", pend.id)
             else
-                [fOk, fLots, fEntry, fT1, fT2, fRisk, fTop, fBot, fFirst] = findFvg(pend, entryModel != "Breaker only")
+                // breaker block has priority; the first FVG is used only when there is no valid breaker
                 [bOk, bLots, bEntry, bT1, bT2, bRisk] = breakerEntry(pend, entryModel != "FVG only")
-                bool useF = fOk
-                if fOk and bOk
-                    // price is below both levels for a sell (above for a buy): the nearer one is reached first
-                    bool fNear = pend.dir < 0 ? fEntry < bEntry : fEntry > bEntry
-                    useF := entryPref == "Nearest to price" ? fNear : not fNear
+                [fOk, fLots, fEntry, fT1, fT2, fRisk, fTop, fBot, fFirst] = findFvg(pend, entryModel != "Breaker only" and not bOk)
+                bool useF = not bOk and fOk
                 if fOk or bOk
                     pend.model         := useF ? "FVG" : "Breaker"
                     pend.lots          := useF ? fLots : bLots
@@ -541,9 +577,9 @@ if showTable and barstate.islast
     else if pend.state == 1
         st := pend.id + ": CRT confirmed - waiting for the next 4H candle"
     else if pend.state == 2
-        st := pend.id + ": entry window open - waiting for LTF MSS"
+        st := pend.id + ": entry window open - waiting for MSS (close beyond the swing left of the sweep)"
     else if pend.state == 3
-        st := pend.id + ": MSS confirmed - waiting for FVG / breaker entry"
+        st := pend.id + ": MSS confirmed - waiting for breaker / FVG entry"
     table.cell(tbl, 0, 0, modeTxt, text_color = color.white, text_size = size.small, text_halign = text.align_left)
     table.cell(tbl, 0, 1, st, text_color = color.white, text_size = size.small, text_halign = text.align_left)
     if badTf

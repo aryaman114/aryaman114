@@ -28,32 +28,37 @@ A TradingView (Pine Script) version with the same rules is in [`../MNQ-CRT-Tradi
 |---|---|
 | Range candle | The 4H candle that starts at your **time box** (start hour, minute, **AM/PM**). Its high and low **include the wicks**. |
 | Sweep candle | The next 4H candle must trade beyond **one** end of the range and **close back inside** it. **High swept → SELL**, target = range low. **Low swept → BUY**, target = range high. If the next candle does not sweep, the setup is ignored. If it sweeps both ends or closes outside the range, it is also ignored. |
-| Entry candle | During the 4H candle after the sweep, the strategy works on your **5 min or 15 min** chart. It waits for an **MSS** (market structure shift), then places a **limit order** at one of two levels (see below). |
+| Entry candle | During the 4H candle after the sweep, the strategy works on your **5 min or 15 min** chart. The MSS level is the **first 3-candle swing to the left of the sweep point**. After the MSS, it places a **limit order** at the **breaker block 0.5 level**, or at the **first FVG** midpoint if there is no valid breaker (see below). |
 | Stop loss | The **previous 4H candle** (the sweep candle) **high for sells / low for buys**, plus an optional tick buffer. |
 
-### Entry levels: FVG or breaker block
+### MSS and entry levels
 
-After the MSS, the strategy looks for two entry levels on the lower timeframe:
+```
+ SELL example (lower timeframe)
+                 sweep point (sweep candle high)
+                 ▲
+   swing  ▲  ▲  ╱ ╲  ← first FVG after the sweep (premium half of the leg)
+          ╱╲╱ ╲╱   ╲
+   ──────▼─────────╲───────  MSS level = FIRST 3-candle swing low to the LEFT of the sweep point
+   breaker (last down-close     ╲  close below it = MSS
+   candle at that swing)          ▼
+```
 
-| Entry | Where the limit order goes |
-|---|---|
-| **FVG** (fair value gap) | **Midpoint** of the most recent FVG in the MSS leg that price has not yet come back to. |
-| **Breaker block** | **0.5 level** (halfway between high and low, wicks included) of the breaker candle. For a **sell**, the breaker is the **last down-close candle at the swing low that the MSS broke**. For a **buy**, it is the **last up-close candle at the swing high that the MSS broke**. The strategy looks back at most 5 candles from that swing. |
+1. **Sweep point:** the lower-timeframe candle that made the sweep candle's high (sell) or low (buy).
+2. **MSS level:** the **first 3-candle swing to the left** of the sweep point. For a sell that is a swing low: a candle whose low is below the candles on both sides. For a buy it is a swing high.
+3. **MSS:** a candle **closes beyond** that level (below it for a sell, above it for a buy). The MSS can print inside the sweep candle or in the entry candle. The order is only placed during the entry candle.
+4. **Entry (limit order):**
+   * **Breaker block 0.5 level** comes first. The breaker is the last down-close candle (sells) or up-close candle (buys) at the swing the MSS broke. The 0.5 level is halfway between its high and low, wicks included. **If a breaker and an FVG are both present, the breaker is used.**
+   * **First FVG** is used only when there is no valid breaker. It is the **first** FVG of the move from the sweep point to the MSS (the one nearest the sweep). It must sit in the **premium half** of that leg for sells, or the **discount half** for buys. The limit goes at its midpoint.
 
-The **Entry model** setting chooses which levels to use:
+The **Entry model** setting can limit this to `BreakerOnly` or `FvgOnly`. The default is `FvgOrBreaker` (breaker first, then the first FVG).
 
-* **FvgOrBreaker** (default): use either level. If both are valid at the same time, the **If FVG and breaker are both valid** setting picks one:
-  * **NearestToPrice** (default): the level price reaches **first** on the pullback.
-  * **BestPrice**: the level **closer to the stop**. It gives smaller risk and better reward but fills less often.
-* **FvgOnly**: only the FVG midpoint.
-* **BreakerOnly**: only the breaker block 0.5 level.
-
-Every entry level must pass these checks:
+Every entry level must also pass these checks:
 * It is above 50% of the range for sells (below for buys).
 * Price has not already traded back to it.
 * The risk fits the lot rules below.
 
-If a level fails a check, it is skipped and the Output window says why.
+If a level fails a check, it is skipped and the log says why.
 
 ### Lot size and exits
 
@@ -102,10 +107,8 @@ Standard MNQ 4H candles in New York time start at **6 PM, 10 PM, 2 AM, 6 AM, 10 
 
 | Setting | Default | Meaning |
 |---|---|---|
-| Swing strength | 2 | Bars on each side that define a lower-timeframe swing high/low. |
-| MSS mode | StrictShift | `StrictShift`: the break must **flip** structure. For a sell, the lower timeframe must have been bullish, then a candle **closes below** the last swing low. `AnyBreak`: any close beyond the last swing counts, including a trend continuation (BOS). |
-| Entry model | FvgOrBreaker | `FvgOrBreaker`, `FvgOnly`, or `BreakerOnly` (see section 1). |
-| If FVG and breaker are both valid | NearestToPrice | `NearestToPrice` or `BestPrice` (see section 1). |
+| Swing strength | 1 | Candles on each side of a swing. **1 = 3-candle swing.** The MSS level is the first swing to the left of the sweep point. |
+| Entry model | FvgOrBreaker | `FvgOrBreaker` (breaker 0.5 first, else the first FVG), `FvgOnly`, or `BreakerOnly`. |
 | Min FVG size (ticks) | 2 | Smaller gaps are ignored. |
 | Stop buffer (ticks) | 0 | Extra ticks beyond the sweep candle high/low. |
 
@@ -124,8 +127,11 @@ Standard MNQ 4H candles in New York time start at **6 PM, 10 PM, 2 AM, 6 AM, 10 
 | Setting | Default | Meaning |
 |---|---|---|
 | Flatten before weekend | true | Friday 4:45 PM New York: cancel entries and close any open position. |
-| Show drawings | true | Draws the range box (blue), sweep box (orange), MSS line (magenta), breaker block (purple), FVG used for entry (gold), and entry/SL/TP lines, plus a status line at the top-left. |
+| Show drawings | true | Draws the range box, sweep box, MSS level and MSS line (magenta), breaker block (purple), FVG used for entry (gold), and entry/SL/TP lines, plus a status line at the top-left. |
 | Print log | true | Writes every decision to the NinjaScript Output window. |
+| CRT range box colour | DodgerBlue | Colour of the range candle box and its high/low lines. |
+| Sweep candle box colour | Orange | Colour of the sweep candle box and the CRT label. |
+| Box fill opacity (%) | 10 | 0 = outline only, 100 = solid fill. |
 
 ---
 
@@ -133,11 +139,11 @@ Standard MNQ 4H candles in New York time start at **6 PM, 10 PM, 2 AM, 6 AM, 10 
 
 Some parts of the rules could be read more than one way. This is how the strategy handles each one. If you meant something different, these are easy to change.
 
-1. **Entry candle.** The MSS and the entry level are searched in the 4H candle **after** the sweep candle, because the sweep candle must first close inside the range to confirm the setup. That is why the stop is the "previous 4H candle" (the sweep candle) high or low.
+1. **Entry candle.** The order is only placed in the 4H candle **after** the sweep candle, because the sweep candle must first close inside the range to confirm the setup. The MSS itself can already have printed inside the sweep candle (after the sweep point). The stop is the "previous 4H candle" (the sweep candle) high or low.
 2. **"Stoploss between 300 usd".** This is read as: 2 lots if the **total** risk of both lots is **≤ $300**. Otherwise 1 lot if risk is ≤ $215. Otherwise no trade.
-3. **Breaker block.** The breaker is a single candle: the last down-close candle (sells) or up-close candle (buys) at the swing the MSS broke. Its 0.5 level uses the candle's full high-to-low range, wicks included.
-4. **Which FVG.** The strategy uses the most recent FVG in the MSS leg (from the leg's extreme to now) that price has not yet returned to the midpoint of. If no FVG exists at the moment of the MSS, it keeps looking at new FVGs until the entry candle ends.
-5. **Invalidation.** If price trades beyond the sweep candle high (sells) or low (buys) before the entry fills, the setup is cancelled. A new extreme beyond the MSS leg resets the search, and the strategy waits for a new MSS (with a new breaker).
+3. **Breaker block.** The breaker is a single candle: the last down-close candle (sells) or up-close candle (buys) at the swing the MSS broke, looking back at most 5 candles. Its 0.5 level uses the candle's full high-to-low range, wicks included.
+4. **Which FVG.** The **first** FVG after the sweep point that lies in the premium half (sells) / discount half (buys) of the sweep → MSS leg. An FVG made by the candle right after the MSS candle still counts as part of the same move. If the first one fails a check (for example price already returned to it), the next one in order is tried.
+5. **One MSS per setup.** The MSS level comes from the sweep point, so there is one MSS per setup. If price trades beyond the sweep candle high (sells) or low (buys) before the entry fills, the setup is cancelled.
 6. **Unfilled orders.** A limit order that has not filled by the end of the entry candle, or by the end of the trading session, is cancelled.
 7. **2-lot breakeven.** Lot 2 moves to breakeven when lot 1's target fills. It also moves if price touches 50% without lot 1's limit filling.
 8. **One trade at a time.** A new setup cannot enter while a position from an earlier setup is still open.

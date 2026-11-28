@@ -13,11 +13,12 @@
 //   2. Sweep candle   = the next 4H candle. It must trade beyond ONE end of the range and close back
 //                       inside the range. High swept -> SELL setup (target range low).
 //                       Low swept  -> BUY setup  (target range high). No sweep -> setup ignored.
-//   3. Entry candle   = the 4H candle after the sweep. On the lower timeframe wait for an MSS
-//                       (market structure shift), then place a limit order at either
-//                         - the midpoint of a fair value gap (FVG) in the MSS leg, or
-//                         - the 0.5 level of the breaker block (the last opposite-colour candle at the
-//                           swing that the MSS broke).
+//   3. Entry candle   = the 4H candle after the sweep. On the lower timeframe:
+//                         - MSS level = the first 3-candle swing to the LEFT of the sweep point
+//                           (swing low for sells, swing high for buys). A close beyond it = MSS.
+//                         - Entry = limit at the 0.5 level of the breaker block (last opposite-colour
+//                           candle at that swing). If there is no valid breaker, the midpoint of the
+//                           FIRST FVG of the sweep -> MSS leg (premium half for sells, discount half for buys).
 //   4. Stop loss      = previous 4H candle (the sweep candle) high for sells / low for buys.
 //   5. Lots:          2 lots if total risk <= MaxRiskTwoLots ($300), else 1 lot if risk <= MaxRiskPerLot ($215),
 //                     else no trade.
@@ -57,10 +58,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 {
 	public enum CrtAmPm { AM, PM }
 	public enum CrtTimeZone { NewYork, Chicago, London, India, NinjaTraderLocal }
-	public enum CrtMssMode { StrictShift, AnyBreak }
 	public enum CrtDirection { Both, LongOnly, ShortOnly }
 	public enum CrtEntryModel { FvgOrBreaker, FvgOnly, BreakerOnly }
-	public enum CrtEntryPreference { NearestToPrice, BestPrice }
 
 	public class MnqCrtStrategy : Strategy
 	{
@@ -93,6 +92,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			public DateTime WindowStart, WindowEnd;   // entry window (selected time zone)
 			public SetupState State;
 
+			public int AnchorBar = -1;         // LTF candle of the sweep high (sell) / low (buy)
 			public int MssBar = -1;
 			public int MssSwingBar = -1;
 			public double MssLevel;
@@ -136,6 +136,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private const string TagPrefix = "MNQCRT_";
 		private const int HtfMinutes = 240;
 		private const int BreakerLookback = 5;
+		private const int MaxScanBars = 300;
 		private static readonly TimeSpan WeekendCutoffNy = new TimeSpan(16, 45, 0);
 
 		private TimeZoneInfo ntTz;
@@ -157,16 +158,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private CrtSetup pending;     // confirmed CRT, looking for MSS + FVG
 		private CrtSetup trade;       // setup that owns the working orders / open position
 		private CrtSetup lastTrade;
-
-		// lower-timeframe market structure
-		private double swingHigh, swingLow;
-		private int swingHighBar = -1, swingLowBar = -1;
-		private bool swingHighBroken = true, swingLowBroken = true;
-		private int structure;        // +1 bullish, -1 bearish, 0 unknown
-		private int breakDir;         // break that happened on the current LTF bar
-		private bool breakIsShift;
-		private double breakLevel;
-		private int breakSwingBar;
 
 		private Order entry1, entry2;
 		private bool lot1Filled, lot2Filled, lot1Closed, lot2Closed;
@@ -204,10 +195,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 				RangeStartAmPm = CrtAmPm.AM;
 				OnlyTimeBoxCandle = true;
 
-				SwingStrength = 2;
-				MssMode = CrtMssMode.StrictShift;
+				SwingStrength = 1;
 				EntryModel = CrtEntryModel.FvgOrBreaker;
-				EntryPreference = CrtEntryPreference.NearestToPrice;
 				MinFvgTicks = 2;
 				StopBufferTicks = 0;
 
@@ -220,6 +209,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 				FlattenBeforeWeekend = true;
 				ShowDrawings = true;
 				EnableLog = true;
+				RangeBoxBrush = Brushes.DodgerBlue;
+				SweepBoxBrush = Brushes.Orange;
+				BoxOpacity = 10;
 			}
 			else if (State == State.Configure)
 			{
@@ -392,11 +384,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (ShowDrawings)
 			{
 				Draw.Rectangle(this, TagPrefix + s.Id + "_range", false, range.FirstBarTime, range.High, range.LastBarTime, range.Low,
-					Brushes.DodgerBlue, Brushes.DodgerBlue, 10);
+					RangeBoxBrush, RangeBoxBrush, BoxOpacity);
 				Draw.Rectangle(this, TagPrefix + s.Id + "_sweep", false, sweep.FirstBarTime, sweep.High, sweep.LastBarTime, sweep.Low,
-					Brushes.Orange, Brushes.Orange, 10);
+					SweepBoxBrush, SweepBoxBrush, BoxOpacity);
 				Draw.Text(this, TagPrefix + s.Id + "_label", false, (dir > 0 ? "CRT BUY" : "CRT SELL") + " " + s.Id,
-					sweep.FirstBarTime, dir < 0 ? sweep.High : sweep.Low, dir < 0 ? 12 : -12, Brushes.Orange,
+					sweep.FirstBarTime, dir < 0 ? sweep.High : sweep.Low, dir < 0 ? 12 : -12, SweepBoxBrush,
 					new SimpleFont("Arial", 11), TextAlignment.Left, Brushes.Transparent, Brushes.Transparent, 0);
 			}
 		}
@@ -471,12 +463,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 		#endregion
 
-		#region Lower timeframe: market structure, MSS, FVG, entry
+		#region Lower timeframe: sweep point, MSS, breaker / FVG, entry
 
 		private void ProcessLtfBar()
 		{
 			int cb = CurrentBars[0];
-			UpdateStructure(cb);
 
 			if (ShowDrawings)
 			{
@@ -489,123 +480,140 @@ namespace NinjaTrader.NinjaScript.Strategies
 				return;
 
 			DateTime closeUser = ToUser(Times[0][0]);
-			DateTime openUser = ltfMinutes > 0 ? closeUser.AddMinutes(-ltfMinutes) : ToUser(Times[0][1]);
+			DateTime openUser = LtfOpenUser(cb);
 			if (openUser < s.WindowStart) return;   // bar still belongs to the sweep candle
 			if (openUser >= s.WindowEnd) return;    // window over (expiry is handled on the 1-minute series)
 			bool canPlace = closeUser < s.WindowEnd;
 
-			double hi = Highs[0][0];
-			double lo = Lows[0][0];
-
-			// price traded beyond the previous HTF candle extreme before we got in -> setup invalid
-			if (s.Direction < 0 ? hi > s.SweepExtreme : lo < s.SweepExtreme)
+			// price traded beyond the previous 4H candle extreme before we got in -> setup invalid
+			if (s.Direction < 0 ? Highs[0][0] > s.SweepExtreme : Lows[0][0] < s.SweepExtreme)
 			{
 				EndPending("price traded beyond the sweep candle " + (s.Direction < 0 ? "high" : "low") + " before entry");
 				return;
 			}
 
-			// a new extreme beyond the MSS leg cancels that MSS -> wait for a fresh one
-			if (s.State == SetupState.WaitingForEntry && (s.Direction < 0 ? hi > s.LegExtreme : lo < s.LegExtreme))
+			// first bar of the entry candle: mark the sweep point and the MSS level to its left
+			if (s.AnchorBar < 0)
 			{
-				s.State = SetupState.WaitingForMss;
-				Note(s.Id + ": new " + (s.Direction < 0 ? "high" : "low") + " beyond the MSS leg - waiting for a new MSS");
-			}
-
-			if (s.State == SetupState.WaitingForMss && breakDir == s.Direction && (MssMode == CrtMssMode.AnyBreak || breakIsShift))
-			{
-				s.MssBar = cb;
-				s.MssLevel = breakLevel;
-				s.MssSwingBar = breakSwingBar;
-				s.LegBar = breakSwingBar;
-				s.LegExtreme = s.Direction < 0 ? H(breakSwingBar) : L(breakSwingBar);
-				for (int i = breakSwingBar; i <= cb; i++)
+				if (!MarkMssLevel(s, cb))
 				{
-					if (s.Direction < 0 ? H(i) > s.LegExtreme : L(i) < s.LegExtreme)
-					{
-						s.LegExtreme = s.Direction < 0 ? H(i) : L(i);
-						s.LegBar = i;
-					}
+					EndPending("no " + (s.Direction < 0 ? "swing low" : "swing high") + " found to the left of the sweep - setup skipped");
+					return;
 				}
-				// Breaker block: the last opposite-colour candle at/before the swing that was just broken
-				// (down-close candle at the swing low for sells, up-close candle at the swing high for buys).
-				s.BreakerBar = -1;
-				s.BreakerReported = false;
-				for (int i = breakSwingBar; i >= Math.Max(0, breakSwingBar - BreakerLookback); i--)
+				// the MSS may already have printed after the sweep, inside the sweep candle
+				for (int j = s.AnchorBar + 1; j < cb; j++)
 				{
-					if (s.Direction < 0 ? BarClose(i) < BarOpen(i) : BarClose(i) > BarOpen(i))
+					if (s.Direction < 0 ? BarClose(j) < s.MssLevel : BarClose(j) > s.MssLevel)
 					{
-						s.BreakerBar = i;
-						s.BreakerTop = H(i);
-						s.BreakerBottom = L(i);
+						ConfirmMss(s, j);
 						break;
 					}
 				}
-
-				s.State = SetupState.WaitingForEntry;
-				Note(string.Format("{0}: {1} MSS confirmed - close {2} beyond swing {3}. Leg extreme {4}. {5}",
-					s.Id, s.Direction < 0 ? "bearish" : "bullish", P(Closes[0][0]), P(s.MssLevel), P(s.LegExtreme),
-					s.BreakerBar >= 0
-						? "Breaker block " + P(s.BreakerBottom) + "-" + P(s.BreakerTop) + " (0.5 = " + P(RoundPrice((s.BreakerTop + s.BreakerBottom) / 2.0)) + ")."
-						: "No breaker candle found."));
-				if (ShowDrawings && s.BreakerBar >= 0)
-					Draw.Rectangle(this, TagPrefix + s.Id + "_bb" + cb, false, BarsArray[0].GetTime(s.BreakerBar), s.BreakerTop, Times[0][0], s.BreakerBottom,
-						Brushes.MediumPurple, Brushes.MediumPurple, 25);
-				if (ShowDrawings)
-				{
-					Draw.Line(this, TagPrefix + s.Id + "_mss" + cb, false, BarsArray[0].GetTime(breakSwingBar), s.MssLevel, Times[0][0], s.MssLevel,
-						Brushes.Magenta, DashStyleHelper.Solid, 2);
-					Draw.Text(this, TagPrefix + s.Id + "_msst" + cb, false, "MSS", Times[0][0], s.MssLevel, s.Direction < 0 ? -10 : 10,
-						Brushes.Magenta, new SimpleFont("Arial", 10), TextAlignment.Left, Brushes.Transparent, Brushes.Transparent, 0);
-				}
 			}
+
+			if (s.State == SetupState.WaitingForMss && (s.Direction < 0 ? Closes[0][0] < s.MssLevel : Closes[0][0] > s.MssLevel))
+				ConfirmMss(s, cb);
 
 			if (s.State == SetupState.WaitingForEntry && canPlace)
 				TryEntry(s, cb);
 		}
 
-		// Fractal swing points + break-of-structure tracking on the lower timeframe (closed bars only).
-		private void UpdateStructure(int cb)
+		private DateTime LtfOpenUser(int barIndex)
 		{
-			breakDir = 0;
-			breakIsShift = false;
+			DateTime closeUser = ToUser(BarsArray[0].GetTime(barIndex));
+			if (ltfMinutes > 0) return closeUser.AddMinutes(-ltfMinutes);
+			return barIndex > 0 ? ToUser(BarsArray[0].GetTime(barIndex - 1)) : closeUser;
+		}
+
+		// Sweep point = the lower-timeframe candle that made the sweep candle's high (sell) / low (buy).
+		// MSS level   = the FIRST swing low (sell) / swing high (buy) to the LEFT of the sweep point.
+		//               Swing strength 1 = 3-candle swing (the middle candle's low is below both neighbours).
+		private bool MarkMssLevel(CrtSetup s, int cb)
+		{
+			int anchorBar = -1;
+			double ext = 0;
+			for (int i = cb - 1; i >= 0 && cb - i <= MaxScanBars; i--)
+			{
+				DateTime open = LtfOpenUser(i);
+				if (open < s.Sweep.WindowStart) break;
+				if (open >= s.Sweep.WindowEnd) continue;
+				double v = s.Direction < 0 ? H(i) : L(i);
+				if (anchorBar < 0 || (s.Direction < 0 ? v > ext : v < ext))   // ties keep the latest candle
+				{
+					anchorBar = i;
+					ext = v;
+				}
+			}
+			if (anchorBar < 0) return false;
 
 			int n = SwingStrength;
-			int p = cb - n;
-			if (p - n >= 0)
+			for (int i = anchorBar - n; i >= n && anchorBar - i <= MaxScanBars; i--)
 			{
-				double ph = H(p), pl = L(p);
-				bool isHigh = true, isLow = true;
-				for (int k = 1; k <= n; k++)
+				bool swing = true;
+				for (int k = 1; k <= n && swing; k++)
 				{
-					if (H(p - k) >= ph || H(p + k) > ph) isHigh = false;
-					if (L(p - k) <= pl || L(p + k) < pl) isLow = false;
+					if (s.Direction < 0)
+						swing = L(i - k) > L(i) && L(i + k) >= L(i);
+					else
+						swing = H(i - k) < H(i) && H(i + k) <= H(i);
 				}
-				if (isHigh) { swingHigh = ph; swingHighBar = p; swingHighBroken = false; }
-				if (isLow) { swingLow = pl; swingLowBar = p; swingLowBroken = false; }
+				if (!swing) continue;
+
+				s.AnchorBar = anchorBar;
+				s.LegBar = anchorBar;
+				s.LegExtreme = ext;
+				s.MssSwingBar = i;
+				s.MssLevel = s.Direction < 0 ? L(i) : H(i);
+				Note(string.Format("{0}: sweep point {1} at {2:MM-dd HH:mm}. MSS level = first swing {3} to its left: {4} ({5:MM-dd HH:mm})",
+					s.Id, P(ext), BarsArray[0].GetTime(anchorBar), s.Direction < 0 ? "low" : "high", P(s.MssLevel), BarsArray[0].GetTime(i)));
+				if (ShowDrawings)
+					Draw.Line(this, TagPrefix + s.Id + "_msslvl", false, BarsArray[0].GetTime(i), s.MssLevel, BarsArray[0].GetTime(anchorBar), s.MssLevel,
+						Brushes.Magenta, DashStyleHelper.Dash, 1);
+				return true;
+			}
+			return false;
+		}
+
+		private void ConfirmMss(CrtSetup s, int bar)
+		{
+			s.MssBar = bar;
+			s.State = SetupState.WaitingForEntry;
+
+			// Breaker block: the last opposite-colour candle at/before the swing that was broken
+			// (down-close candle at the swing low for sells, up-close candle at the swing high for buys).
+			s.BreakerBar = -1;
+			s.BreakerReported = false;
+			for (int i = s.MssSwingBar; i >= Math.Max(0, s.MssSwingBar - BreakerLookback); i--)
+			{
+				if (s.Direction < 0 ? BarClose(i) < BarOpen(i) : BarClose(i) > BarOpen(i))
+				{
+					s.BreakerBar = i;
+					s.BreakerTop = H(i);
+					s.BreakerBottom = L(i);
+					break;
+				}
 			}
 
-			double c = Closes[0][0];
-			if (swingLowBar >= 0 && !swingLowBroken && c < swingLow)
+			DateTime mssTime = BarsArray[0].GetTime(bar);
+			Note(string.Format("{0}: {1} MSS confirmed {2:MM-dd HH:mm} - close {3} beyond {4}. {5}",
+				s.Id, s.Direction < 0 ? "bearish" : "bullish", mssTime, P(BarClose(bar)), P(s.MssLevel),
+				s.BreakerBar >= 0
+					? "Breaker block " + P(s.BreakerBottom) + "-" + P(s.BreakerTop) + " (0.5 = " + P(RoundPrice((s.BreakerTop + s.BreakerBottom) / 2.0)) + ")."
+					: "No breaker candle found."));
+
+			if (ShowDrawings)
 			{
-				swingLowBroken = true;
-				breakDir = -1;
-				breakIsShift = structure != -1;
-				breakLevel = swingLow;
-				breakSwingBar = swingLowBar;
-				structure = -1;
-			}
-			else if (swingHighBar >= 0 && !swingHighBroken && c > swingHigh)
-			{
-				swingHighBroken = true;
-				breakDir = 1;
-				breakIsShift = structure != 1;
-				breakLevel = swingHigh;
-				breakSwingBar = swingHighBar;
-				structure = 1;
+				Draw.Line(this, TagPrefix + s.Id + "_mss", false, BarsArray[0].GetTime(s.MssSwingBar), s.MssLevel, mssTime, s.MssLevel,
+					Brushes.Magenta, DashStyleHelper.Solid, 2);
+				Draw.Text(this, TagPrefix + s.Id + "_msst", false, "MSS", mssTime, s.MssLevel, s.Direction < 0 ? -10 : 10,
+					Brushes.Magenta, new SimpleFont("Arial", 10), TextAlignment.Left, Brushes.Transparent, Brushes.Transparent, 0);
+				if (s.BreakerBar >= 0)
+					Draw.Rectangle(this, TagPrefix + s.Id + "_bb", false, BarsArray[0].GetTime(s.BreakerBar), s.BreakerTop, mssTime, s.BreakerBottom,
+						Brushes.MediumPurple, Brushes.MediumPurple, 25);
 			}
 		}
 
-		// After the MSS: find the valid FVG and breaker-block entries and place a limit at the chosen one.
+		// After the MSS: breaker block 0.5 has priority; the first FVG is used only when there is no valid breaker.
 		private void TryEntry(CrtSetup s, int cb)
 		{
 			if (trade != null || Position.MarketPosition != MarketPosition.Flat)
@@ -620,28 +628,23 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (FlattenBeforeWeekend && IsWeekendCutoff(Times[0][0]))
 				return;
 
-			EntryCandidate fvg = EntryModel != CrtEntryModel.BreakerOnly ? FindFvgEntry(s, cb) : null;
-			EntryCandidate breaker = EntryModel != CrtEntryModel.FvgOnly ? FindBreakerEntry(s, cb) : null;
-
-			EntryCandidate pick = fvg ?? breaker;
-			if (fvg != null && breaker != null)
-			{
-				// price is below both levels for a sell (above for a buy): the "nearer" level is reached first
-				bool fvgNearer = s.Direction < 0 ? fvg.Entry < breaker.Entry : fvg.Entry > breaker.Entry;
-				if (EntryPreference == CrtEntryPreference.NearestToPrice)
-					pick = fvgNearer ? fvg : breaker;
-				else
-					pick = fvgNearer ? breaker : fvg;
-			}
+			EntryCandidate pick = null;
+			if (EntryModel != CrtEntryModel.FvgOnly)
+				pick = FindBreakerEntry(s, cb);
+			if (pick == null && EntryModel != CrtEntryModel.BreakerOnly)
+				pick = FindFvgEntry(s, cb);
 			if (pick != null)
 				PlaceEntry(s, pick);
 		}
 
-		// Most recent unmitigated FVG inside the MSS leg (or formed after it) that passes the entry checks.
+		// FIRST FVG of the sweep -> MSS leg, in its premium half (sell) / discount half (buy).
+		// FVGs whose middle candle is at most one bar after the MSS candle count (same displacement).
 		private EntryCandidate FindFvgEntry(CrtSetup s, int cb)
 		{
-			int minJ = Math.Max(s.LegBar + 2, 2);
-			for (int j = cb; j >= minJ; j--)
+			double legMid = (s.LegExtreme + s.MssLevel) / 2.0;
+			int firstJ = Math.Max(s.AnchorBar + 2, 2);
+			int lastJ = Math.Min(cb, s.MssBar + 2);
+			for (int j = firstJ; j <= lastJ; j++)
 			{
 				double top, bottom;
 				if (s.Direction < 0)
@@ -657,16 +660,26 @@ namespace NinjaTrader.NinjaScript.Strategies
 				if (top - bottom < MinFvgTicks * TickSize - 1e-9) continue;
 
 				double mid = (top + bottom) / 2.0;
-				bool mitigated = false;
-				for (int k = j + 1; k <= cb; k++)
-				{
-					if (s.Direction < 0 ? H(k) >= mid : L(k) <= mid) { mitigated = true; break; }
-				}
-				if (mitigated) continue;
-
 				string reason;
-				EntryCandidate c = Evaluate(s, "FVG", top, bottom, j - 2, out reason);
-				if (c != null) return c;
+				if (s.Direction < 0 ? mid <= legMid : mid >= legMid)
+				{
+					reason = "not in the " + (s.Direction < 0 ? "premium" : "discount") + " half of the sweep -> MSS leg";
+				}
+				else
+				{
+					bool mitigated = false;
+					for (int k = j + 1; k <= cb; k++)
+					{
+						if (s.Direction < 0 ? H(k) >= mid : L(k) <= mid) { mitigated = true; break; }
+					}
+					if (mitigated)
+						reason = "price already came back to its midpoint";
+					else
+					{
+						EntryCandidate c = Evaluate(s, "FVG", top, bottom, j - 2, out reason);
+						if (c != null) return c;
+					}
+				}
 
 				if (j > s.LastReportedFvgBar)
 				{
@@ -990,8 +1003,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 			DateTime now = Times[0][0];
 			string id = TagPrefix + s.Id;
 
-			Draw.Line(this, id + "_rh", false, s.Range.FirstBarTime, s.RangeHigh, now, s.RangeHigh, Brushes.DodgerBlue, DashStyleHelper.Solid, 1);
-			Draw.Line(this, id + "_rl", false, s.Range.FirstBarTime, s.RangeLow, now, s.RangeLow, Brushes.DodgerBlue, DashStyleHelper.Solid, 1);
+			Draw.Line(this, id + "_rh", false, s.Range.FirstBarTime, s.RangeHigh, now, s.RangeHigh, RangeBoxBrush, DashStyleHelper.Solid, 1);
+			Draw.Line(this, id + "_rl", false, s.Range.FirstBarTime, s.RangeLow, now, s.RangeLow, RangeBoxBrush, DashStyleHelper.Solid, 1);
 			Draw.Line(this, id + "_rm", false, s.Range.FirstBarTime, s.RangeMid, now, s.RangeMid, Brushes.Gray, DashStyleHelper.Dash, 1);
 
 			if (s.State == SetupState.OrderWorking || s.State == SetupState.InTrade)
@@ -1017,9 +1030,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 			else if (pending != null && pending.State == SetupState.WaitingForWindow)
 				state = pending.Id + ": CRT confirmed - waiting for the next candle";
 			else if (pending != null && pending.State == SetupState.WaitingForMss)
-				state = pending.Id + ": entry window open - waiting for LTF MSS";
+				state = pending.Id + ": entry window open - waiting for MSS (close beyond the swing left of the sweep)";
 			else if (pending != null && pending.State == SetupState.WaitingForEntry)
-				state = pending.Id + ": MSS confirmed - waiting for FVG / breaker entry";
+				state = pending.Id + ": MSS confirmed - waiting for breaker / FVG entry";
 			else
 				state = "Waiting for range candle + sweep";
 
@@ -1155,29 +1168,21 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 		[NinjaScriptProperty]
 		[Range(1, 10)]
-		[Display(Name = "Swing strength (bars each side)", Description = "Bars on each side that define a lower-timeframe swing high/low used for the MSS.", Order = 1, GroupName = "2. LTF Entry (MSS + FVG / Breaker)")]
+		[Display(Name = "Swing strength (bars each side)", Description = "1 = 3-candle swing. The MSS level is the first swing to the left of the sweep point.", Order = 1, GroupName = "2. LTF Entry (MSS + FVG / Breaker)")]
 		public int SwingStrength { get; set; }
 
 		[NinjaScriptProperty]
-		[Display(Name = "MSS mode", Description = "StrictShift = the break must flip LTF structure (bullish -> bearish for sells). AnyBreak = any close beyond the last swing counts.", Order = 2, GroupName = "2. LTF Entry (MSS + FVG / Breaker)")]
-		public CrtMssMode MssMode { get; set; }
-
-		[NinjaScriptProperty]
-		[Display(Name = "Entry model", Description = "FvgOrBreaker = limit at the FVG midpoint or at the breaker block 0.5 level. FvgOnly / BreakerOnly = use only that one.", Order = 3, GroupName = "2. LTF Entry (MSS + FVG / Breaker)")]
+		[Display(Name = "Entry model", Description = "FvgOrBreaker = breaker block 0.5 level; if there is no valid breaker, the midpoint of the first FVG. FvgOnly / BreakerOnly = use only that one.", Order = 2, GroupName = "2. LTF Entry (MSS + FVG / Breaker)")]
 		public CrtEntryModel EntryModel { get; set; }
 
 		[NinjaScriptProperty]
-		[Display(Name = "If FVG and breaker are both valid", Description = "NearestToPrice = the level price reaches first on the pullback. BestPrice = the level closer to the stop (smaller risk, fills less often).", Order = 4, GroupName = "2. LTF Entry (MSS + FVG / Breaker)")]
-		public CrtEntryPreference EntryPreference { get; set; }
-
-		[NinjaScriptProperty]
 		[Range(1, int.MaxValue)]
-		[Display(Name = "Min FVG size (ticks)", Order = 5, GroupName = "2. LTF Entry (MSS + FVG / Breaker)")]
+		[Display(Name = "Min FVG size (ticks)", Order = 3, GroupName = "2. LTF Entry (MSS + FVG / Breaker)")]
 		public int MinFvgTicks { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(0, int.MaxValue)]
-		[Display(Name = "Stop buffer (ticks)", Description = "Extra ticks beyond the previous HTF candle high/low for the stop loss.", Order = 6, GroupName = "2. LTF Entry (MSS + FVG / Breaker)")]
+		[Display(Name = "Stop buffer (ticks)", Description = "Extra ticks beyond the previous HTF candle high/low for the stop loss.", Order = 4, GroupName = "2. LTF Entry (MSS + FVG / Breaker)")]
 		public int StopBufferTicks { get; set; }
 
 		[NinjaScriptProperty]
@@ -1212,6 +1217,32 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 		[Display(Name = "Print log to Output window", Order = 2, GroupName = "5. Display")]
 		public bool EnableLog { get; set; }
+
+		[XmlIgnore]
+		[Display(Name = "CRT range box colour", Order = 3, GroupName = "5. Display")]
+		public Brush RangeBoxBrush { get; set; }
+
+		[Browsable(false)]
+		public string RangeBoxBrushSerializable
+		{
+			get { return Serialize.BrushToString(RangeBoxBrush); }
+			set { RangeBoxBrush = Serialize.StringToBrush(value); }
+		}
+
+		[XmlIgnore]
+		[Display(Name = "Sweep candle box colour", Order = 4, GroupName = "5. Display")]
+		public Brush SweepBoxBrush { get; set; }
+
+		[Browsable(false)]
+		public string SweepBoxBrushSerializable
+		{
+			get { return Serialize.BrushToString(SweepBoxBrush); }
+			set { SweepBoxBrush = Serialize.StringToBrush(value); }
+		}
+
+		[Range(0, 100)]
+		[Display(Name = "Box fill opacity (%)", Description = "0 = outline only, 100 = solid.", Order = 5, GroupName = "5. Display")]
+		public int BoxOpacity { get; set; }
 
 		#endregion
 	}

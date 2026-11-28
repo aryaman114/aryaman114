@@ -10,8 +10,9 @@ File: [`MnqCrtStrategy.pine`](MnqCrtStrategy.pine)
 2. **Sweep candle:** the next 4H candle must trade beyond **one** end of the range and **close back inside**.
    **High swept → SELL**, target = range low. **Low swept → BUY**, target = range high. No sweep → no trade.
 3. **Entry candle:** during the 4H candle after the sweep, on the 5 or 15 minute chart:
-   1. wait for an **MSS**, then
-   2. place a **limit order** at the **FVG midpoint** or at the **breaker block 0.5 level**.
+   1. **MSS level** = the **first 3-candle swing to the left of the sweep point** (swing low for sells, swing high for buys). A candle **closing beyond** it = MSS. It can print inside the sweep candle or the entry candle.
+   2. **Entry** = limit at the **breaker block 0.5 level**. The breaker always wins when an FVG is also present.
+   3. If there is no valid breaker, the limit goes at the midpoint of the **first FVG** of the sweep → MSS move. That FVG must be in the premium half of the move for sells, or the discount half for buys.
 4. **Stop loss:** the sweep candle **high (sells) / low (buys)**.
 5. **Lots:**
    * **2 lots** if both lots together risk **≤ $300**. Lot 1 books at **50%** of the range and lot 2 at the **opposite end**. Lot 2 moves to **breakeven** after lot 1 books.
@@ -47,10 +48,8 @@ Pick **"Order fills and alert() function calls"** to also get every fill.
 | CRT Range | Time box time zone | America/New_York |
 | | Range start (hour : minute AM/PM) | 2:00 AM (2–6 AM range → 6–10 AM sweep → 10 AM–2 PM entry) |
 | | Only the time-box candle | On (Off = check every 4H candle) |
-| LTF Entry | Swing strength | 2 bars each side |
-| | MSS mode | Strict shift (Any break also allowed) |
-| | Entry model | FVG or Breaker (also FVG only / Breaker only) |
-| | If FVG and breaker are both valid | Nearest to price (or Best price) |
+| LTF Entry | Swing strength | 1 bar each side (= 3-candle swing) |
+| | Entry model | FVG or Breaker = breaker 0.5 first, else first FVG (also FVG only / Breaker only) |
 | | Min FVG size | 2 ticks |
 | | Stop buffer | 0 ticks |
 | Risk & Lots | Max total risk for 2 lots | $300 |
@@ -60,11 +59,14 @@ Pick **"Order fills and alert() function calls"** to also get every fill.
 | | Allowed direction | Both |
 | Session / Display | Flatten before weekend (Fri 4:45 PM New York) | On |
 | | Show drawings / status table | On |
+| | CRT range box colour + fill | Blue (fill 90% transparent) |
+| | Sweep candle box colour + fill | Orange (fill 90% transparent) |
 
 **Chart colours:**
-* Blue box: range candle. Orange box: sweep candle.
-* Blue lines: range high and low. Grey dashed line: 50%.
-* Pink line: MSS. Purple box: breaker block. Orange zone: FVG used for the entry.
+* Range candle box and its high/low lines: **your range colour** (default blue). Sweep candle box: **your sweep colour** (default orange). Change both under *Session / Display* in the settings.
+* Grey dashed line: 50% of the range.
+* Pink dashed line: MSS level (swing left of the sweep). Solid pink line + "MSS": the break.
+* Purple box: breaker block. Orange zone: FVG used for the entry.
 * Aqua line: entry. Red line: stop. Green lines: targets.
 
 ## Differences from the NinjaTrader version
