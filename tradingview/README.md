@@ -16,6 +16,7 @@ One overlay indicator for ICT / SMC market structure. Everything runs on the cha
 | **MSS** | A CHoCH with displacement. Either the break candle's body is ≥ 1.5 × ATR(14), or the break leaves an FVG (selectable). Thick line, own colors. |
 | **IDM** | The first pullback swing after a BOS (option: after CHoCH/MSS too). Dotted line, labeled **IDM** when a wick sweeps it. |
 | **FVG** | 3-candle imbalance with an optional ATR size filter. Extend modes: **Until Tapped**, **Until Session End**, **Until Day End**. |
+| **FVG / IFVG Show filter** | *All*, *First & Last of Swing*, *First of Swing* or *Last of Swing*, set separately for FVG and IFVG. A swing is the leg between two consecutive confirmed swing points. The filter only hides boxes: hidden FVGs can still turn into IFVGs. |
 | **IFVG** | A candle **closes** fully through an FVG, so the FVG flips bias. Same three extend modes. It also ends if price closes back through it. |
 | **Swing BSL / SSL** | Dashed line at each swing high / low, stopped and marked ✕ when swept. |
 | **EQH / EQL** | Two swing highs / lows within the tolerance (default 0.1 × ATR). |

@@ -10,6 +10,10 @@ TRANSP   = color.new(color.black, 100)
 MODE_TAP = "Until Tapped"
 MODE_SES = "Until Session End"
 MODE_DAY = "Until Day End"
+FLT_ALL  = "All"
+FLT_FL   = "First & Last of Swing"
+FLT_F    = "First of Swing"
+FLT_L    = "Last of Swing"
 
 // =====================================================================================
 // INPUTS
@@ -49,11 +53,15 @@ gF          = "Fair Value Gaps (FVG / IFVG)"
 showFVG     = input.bool(true, "Show FVG", group = gF)
 fvgMode     = input.string(MODE_TAP, "FVG Extend", options = [MODE_TAP, MODE_SES, MODE_DAY], group = gF,
      tooltip = "• Until Tapped: the box stops at the first candle that trades back into it.\n• Until Session End: the box extends until the current (or next) enabled killzone ends.\n• Until Day End: the box extends until midnight in the selected timezone.\nIn every mode, a candle CLOSE fully through an FVG turns it into an IFVG.")
+fvgFilter   = input.string(FLT_ALL, "FVG Show", options = [FLT_ALL, FLT_FL, FLT_F, FLT_L], group = gF,
+     tooltip = "A swing = the leg between two consecutive confirmed swing points (uses the Swing Pivot Length).\nWithin each swing only the first and/or last gap of each direction is shown.\nThe 'last' gap of the current swing updates live until the next swing point is confirmed.\nHidden gaps are still tracked, so they can still invert into IFVGs.")
 fvgBullCol  = input.color(color.new(#089981, 80), "Bullish", inline = "fc", group = gF)
 fvgBearCol  = input.color(color.new(#F23645, 80), "Bearish", inline = "fc", group = gF)
 showIFVG    = input.bool(true, "Show IFVG (Inverted FVG)", group = gF)
 ifvgMode    = input.string(MODE_TAP, "IFVG Extend", options = [MODE_TAP, MODE_SES, MODE_DAY], group = gF,
      tooltip = "Same options as FVG. An IFVG also ends if price closes back through it. 'Until Tapped' only counts a tap after price has first moved away from the zone.")
+ifvgFilter  = input.string(FLT_ALL, "IFVG Show", options = [FLT_ALL, FLT_FL, FLT_F, FLT_L], group = gF,
+     tooltip = "Same as 'FVG Show', applied to IFVGs. An IFVG belongs to the swing in which the inversion candle closed.")
 ifvgBullCol = input.color(color.new(#2962FF, 80), "Bullish", inline = "ifc", group = gF)
 ifvgBearCol = input.color(color.new(#FF9800, 80), "Bearish", inline = "ifc", group = gF)
 fvgMinAtr   = input.float(0.0, "Min Gap Size (× ATR)", minval = 0.0, step = 0.05, group = gF,
@@ -160,8 +168,11 @@ type FVG
     float top
     float btm
     bool  bull
-    bool  armed     = true
-    bool  extending = true
+    bool   armed     = true
+    bool   extending = true
+    int    born      = na     // bar of the displacement / inversion candle (assigns the gap to a swing)
+    color  fill      = na     // original color (restored when the gap becomes visible again)
+    string txt       = ""
 
 // Running state of one session / killzone
 type Sess
@@ -268,6 +279,47 @@ f_session(Sess s, bool inS, string name, color col, array<Liq> arr) =>
             arr.push(f_level(s.start, s.lo, false, name + " L", c, line.style_dotted))
     s.active := inS
     ended
+
+// ── FVG / IFVG "per swing" filter ────────────────────────────────────────────────────
+// Is gap #i (of n gaps in one swing) shown under the selected filter?
+f_keep(string flt, int i, int n) =>
+    flt == FLT_ALL or (flt == FLT_FL and (i == 0 or i == n - 1)) or (flt == FLT_F and i == 0) or (flt == FLT_L and i == n - 1)
+
+// Show / hide the gaps of one swing. final = swing finished -> hidden boxes are deleted.
+f_applyVis(array<FVG> arr, string flt, bool final) =>
+    int n = arr.size()
+    if n > 0
+        for i = 0 to n - 1
+            FVG f = arr.get(i)
+            if not na(f.bx)
+                if f_keep(flt, i, n)
+                    f.bx.set_bgcolor(f.fill)
+                    f.bx.set_text(f.txt)
+                else if final
+                    f.bx.delete()
+                    f.bx := na
+                else
+                    f.bx.set_bgcolor(TRANSP)
+                    f.bx.set_text("")
+    n
+
+// A new swing point at bar pb ends the current swing: gaps born after it move to the new swing.
+// incl = gaps born ON the pivot bar also move (used for gaps in the new swing's direction).
+f_split(array<FVG> cur, int pb, bool incl, string flt) =>
+    array<FVG> nxt = array.new<FVG>()
+    while cur.size() > 0
+        FVG lastG = cur.last()
+        if lastG.born > pb or (incl and lastG.born == pb)
+            nxt.unshift(cur.pop())
+        else
+            break
+    f_applyVis(cur, flt, true)
+    f_applyVis(nxt, flt, false)
+    nxt
+
+f_addToLeg(array<FVG> leg, FVG f, string flt) =>
+    leg.push(f)
+    f_applyVis(leg, flt, false)
 
 // =====================================================================================
 // CORE SERIES
@@ -564,6 +616,12 @@ if slOpen and close < slPrice
 var array<FVG> fvgs  = array.new<FVG>()
 var array<FVG> ifvgs = array.new<FVG>()
 
+// Gaps of the CURRENT swing, per type and direction (only used when a "Show" filter is active)
+var array<FVG> legBullF = array.new<FVG>()
+var array<FVG> legBearF = array.new<FVG>()
+var array<FVG> legBullI = array.new<FVG>()
+var array<FVG> legBearI = array.new<FVG>()
+
 // ── Update IFVGs ─────────────────────────────────────────────────────────────────────
 int nI = ifvgs.size()
 if nI > 0
@@ -575,10 +633,11 @@ if nI > 0
             g.armed := true
         bool stop = broke or (ifvgMode == MODE_TAP ? tapped : ifvgMode == MODE_SES ? sessEndEvt : newDay)
         if stop
-            int rightX = broke or ifvgMode == MODE_TAP ? bar_index : bar_index - 1
-            g.bx.set_right(math.max(rightX, g.bx.get_left()))
+            if not na(g.bx)
+                int rightX = broke or ifvgMode == MODE_TAP ? bar_index : bar_index - 1
+                g.bx.set_right(math.max(rightX, g.bx.get_left()))
             ifvgs.remove(i)
-        else
+        else if not na(g.bx)
             g.bx.set_right(bar_index)
 
 // ── Update FVGs (and convert to IFVG on a close through) ─────────────────────────────
@@ -593,11 +652,15 @@ if nF > 0
                 f.bx.set_right(bar_index)
             kill := true
             if showIFVG
-                bool nb = not f.bull
+                bool   nb  = not f.bull
+                color  ic  = nb ? ifvgBullCol : ifvgBearCol
+                string itx = showFText ? "IFVG" : ""
                 box ib = box.new(bar_index, f.top, bar_index, f.btm, border_color = TRANSP,
-                     bgcolor = nb ? ifvgBullCol : ifvgBearCol, text = showFText ? "IFVG" : "",
-                     text_size = size.tiny, text_color = fTxtCol, text_halign = text.align_right)
-                ifvgs.push(FVG.new(ib, f.top, f.btm, nb, false))
+                     bgcolor = ic, text = itx, text_size = size.tiny, text_color = fTxtCol, text_halign = text.align_right)
+                FVG ni = FVG.new(ib, f.top, f.btm, nb, false, born = bar_index, fill = ic, txt = itx)
+                ifvgs.push(ni)
+                if ifvgFilter != FLT_ALL
+                    f_addToLeg(nb ? legBullI : legBearI, ni, ifvgFilter)
         else if f.extending
             bool tapped = f.bull ? low <= f.top : high >= f.btm
             bool stop   = fvgMode == MODE_TAP ? tapped : fvgMode == MODE_SES ? sessEndEvt : newDay
@@ -615,23 +678,50 @@ if nF > 0
 while ifvgs.size() > fvgMax
     ifvgs.shift()
 
+// ── New swing point -> close the current swing for the "Show" filter ─────────────────
+// After a swing HIGH the new swing is bearish; after a swing LOW it is bullish.
+if not na(ph)
+    int pb = bar_index - pLen
+    if fvgFilter != FLT_ALL
+        legBullF := f_split(legBullF, pb, false, fvgFilter)
+        legBearF := f_split(legBearF, pb, true,  fvgFilter)
+    if ifvgFilter != FLT_ALL
+        legBullI := f_split(legBullI, pb, false, ifvgFilter)
+        legBearI := f_split(legBearI, pb, true,  ifvgFilter)
+
+if not na(pl)
+    int pb = bar_index - pLen
+    if fvgFilter != FLT_ALL
+        legBullF := f_split(legBullF, pb, true,  fvgFilter)
+        legBearF := f_split(legBearF, pb, false, fvgFilter)
+    if ifvgFilter != FLT_ALL
+        legBullI := f_split(legBullI, pb, true,  ifvgFilter)
+        legBearI := f_split(legBearI, pb, false, ifvgFilter)
+
 // ── Detect new FVGs ──────────────────────────────────────────────────────────────────
 if (showFVG or showIFVG) and bar_index >= 2
-    float minGap  = fvgMinAtr * nz(atr)
-    bool  bullGap = low > high[2] and close[1] > high[2] and (low - high[2]) >= minGap
-    bool  bearGap = high < low[2] and close[1] < low[2] and (low[2] - high) >= minGap
+    float  minGap  = fvgMinAtr * nz(atr)
+    bool   bullGap = low > high[2] and close[1] > high[2] and (low - high[2]) >= minGap
+    bool   bearGap = high < low[2] and close[1] < low[2] and (low[2] - high) >= minGap
+    string ftx     = showFText ? "FVG" : ""
     if bullGap
         box b = na
         if showFVG
             b := box.new(bar_index - 2, low, bar_index, high[2], border_color = TRANSP, bgcolor = fvgBullCol,
-                 text = showFText ? "FVG" : "", text_size = size.tiny, text_color = fTxtCol, text_halign = text.align_right)
-        fvgs.push(FVG.new(b, low, high[2], true))
+                 text = ftx, text_size = size.tiny, text_color = fTxtCol, text_halign = text.align_right)
+        FVG nf = FVG.new(b, low, high[2], true, born = bar_index - 1, fill = fvgBullCol, txt = ftx)
+        fvgs.push(nf)
+        if showFVG and fvgFilter != FLT_ALL
+            f_addToLeg(legBullF, nf, fvgFilter)
     if bearGap
         box b = na
         if showFVG
             b := box.new(bar_index - 2, low[2], bar_index, high, border_color = TRANSP, bgcolor = fvgBearCol,
-                 text = showFText ? "FVG" : "", text_size = size.tiny, text_color = fTxtCol, text_halign = text.align_right)
-        fvgs.push(FVG.new(b, low[2], high, false))
+                 text = ftx, text_size = size.tiny, text_color = fTxtCol, text_halign = text.align_right)
+        FVG nf = FVG.new(b, low[2], high, false, born = bar_index - 1, fill = fvgBearCol, txt = ftx)
+        fvgs.push(nf)
+        if showFVG and fvgFilter != FLT_ALL
+            f_addToLeg(legBearF, nf, fvgFilter)
     while fvgs.size() > fvgMax
         fvgs.shift()
 
