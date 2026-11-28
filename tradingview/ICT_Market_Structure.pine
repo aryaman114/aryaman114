@@ -23,9 +23,9 @@ FLT_L    = "Last of Swing"
 gMS        = "Market Structure (BOS / CHoCH / MSS)"
 pLen       = input.int(5, "Swing Pivot Length", minval = 1, maxval = 50, group = gMS,
      tooltip = "Number of bars on EACH side needed to confirm a swing high / low on the chart's timeframe. All structure breaks are confirmed on candle CLOSE.")
-showBOS    = input.bool(true, "BOS", inline = "ms", group = gMS)
-showCHoCH  = input.bool(true, "CHoCH", inline = "ms", group = gMS)
-showMSS    = input.bool(true, "MSS", inline = "ms", group = gMS)
+showBOSIn  = input.bool(true, "BOS", inline = "ms", group = gMS)
+showCHoCHIn = input.bool(true, "CHoCH", inline = "ms", group = gMS)
+showMSSIn  = input.bool(true, "MSS", inline = "ms", group = gMS)
 bullCol    = input.color(#089981, "Bullish", inline = "mscol", group = gMS)
 bearCol    = input.color(#F23645, "Bearish", inline = "mscol", group = gMS)
 mssRule    = input.string("Large Body or FVG", "MSS Displacement Rule", options = ["Large Body", "FVG", "Large Body or FVG"], group = gMS,
@@ -37,7 +37,7 @@ lblSizeIn  = input.string("Small", "Label Size", options = ["Tiny", "Small", "No
 
 // ── Inducement ───────────────────────────────────────────────────────────────────────
 gIDM     = "Inducement (IDM)"
-showIDM  = input.bool(true, "Show IDM", inline = "idm", group = gIDM)
+showIDMIn = input.bool(true, "Show IDM", inline = "idm", group = gIDM)
 idmCol   = input.color(#9598A1, "", inline = "idm", group = gIDM)
 idmAfter = input.string("BOS only", "Mark IDM After", options = ["BOS only", "BOS + CHoCH/MSS"], group = gIDM,
      tooltip = "IDM = the FIRST pullback swing that forms after a structure break (a swing low after a bullish break, a swing high after a bearish break). It is drawn as a dotted line and labeled 'IDM' when price sweeps it.")
@@ -50,14 +50,14 @@ swLoCol   = input.color(#089981, "Swing Low", inline = "swc", group = gSW)
 
 // ── FVG / IFVG ───────────────────────────────────────────────────────────────────────
 gF          = "Fair Value Gaps (FVG / IFVG)"
-showFVG     = input.bool(true, "Show FVG", group = gF)
+showFVGIn   = input.bool(true, "Show FVG", group = gF)
 fvgMode     = input.string(MODE_TAP, "FVG Extend", options = [MODE_TAP, MODE_SES, MODE_DAY], group = gF,
      tooltip = "• Until Tapped: the box stops at the first candle that trades back into it.\n• Until Session End: the box extends until the current (or next) enabled killzone ends.\n• Until Day End: the box extends until midnight in the selected timezone.\nIn every mode, a candle CLOSE fully through an FVG turns it into an IFVG.")
 fvgFilter   = input.string(FLT_ALL, "FVG Show", options = [FLT_ALL, FLT_FL, FLT_F, FLT_L], group = gF,
      tooltip = "A swing = the leg between two consecutive confirmed swing points (uses the Swing Pivot Length).\nWithin each swing only the first and/or last gap of each direction is shown.\nThe 'last' gap of the current swing updates live until the next swing point is confirmed.\nHidden gaps are still tracked, so they can still invert into IFVGs.")
 fvgBullCol  = input.color(color.new(#089981, 80), "Bullish", inline = "fc", group = gF)
 fvgBearCol  = input.color(color.new(#F23645, 80), "Bearish", inline = "fc", group = gF)
-showIFVG    = input.bool(true, "Show IFVG (Inverted FVG)", group = gF)
+showIFVGIn  = input.bool(true, "Show IFVG (Inverted FVG)", group = gF)
 ifvgMode    = input.string(MODE_TAP, "IFVG Extend", options = [MODE_TAP, MODE_SES, MODE_DAY], group = gF,
      tooltip = "Same options as FVG. An IFVG also ends if price closes back through it. 'Until Tapped' only counts a tap after price has first moved away from the zone.")
 ifvgFilter  = input.string(FLT_ALL, "IFVG Show", options = [FLT_ALL, FLT_FL, FLT_F, FLT_L], group = gF,
@@ -71,19 +71,33 @@ showFText   = input.bool(true, "Show Box Text", group = gF)
 
 // ── Liquidity ────────────────────────────────────────────────────────────────────────
 gL          = "Liquidity"
-showSwLiq   = input.bool(true, "Swing BSL / SSL", inline = "l1", group = gL)
+showSwLiqIn = input.bool(true, "Swing BSL / SSL", inline = "l1", group = gL)
 bslCol      = input.color(#F7525F, "BSL", inline = "l1", group = gL)
 sslCol      = input.color(#22AB94, "SSL", inline = "l1", group = gL)
-showEQ      = input.bool(true, "Equal Highs / Lows", inline = "l2", group = gL)
+showEQIn    = input.bool(true, "Equal Highs / Lows", inline = "l2", group = gL)
 eqCol       = input.color(#00BCD4, "", inline = "l2", group = gL)
 eqTol       = input.float(0.1, "EQH / EQL Tolerance (× ATR)", minval = 0.0, step = 0.01, group = gL)
-showPD      = input.bool(true, "Previous Day High / Low", inline = "l3", group = gL)
+showPDIn    = input.bool(true, "Previous Day High / Low", inline = "l3", group = gL)
 pdCol       = input.color(#FF9800, "", inline = "l3", group = gL)
-showPW      = input.bool(true, "Previous Week High / Low", inline = "l4", group = gL)
+showPWIn    = input.bool(true, "Previous Week High / Low", inline = "l4", group = gL)
 pwCol       = input.color(#E040FB, "", inline = "l4", group = gL)
-showSessLiq = input.bool(true, "Session High / Low", group = gL,
+showSessLiqIn = input.bool(true, "Session High / Low", group = gL,
      tooltip = "High and low of each enabled killzone, extended until swept. Uses each session's own color.")
 liqMax      = input.int(10, "Max Active Levels (per type)", minval = 1, maxval = 50, group = gL)
+showLiqNames = input.bool(true, "Show Level Names", group = gL,
+     tooltip = "Name at the right end of every liquidity line (BSL, SSL, PDH, PDL, PWH, PWL, Asia H ...). A swept level keeps its name followed by ✕.")
+
+// ── Timeframe Visibility ─────────────────────────────────────────────────────────────
+gTF     = "Timeframe Visibility"
+tfBOS   = input.timeframe("", "BOS", group = gTF,
+     tooltip = "Chart = shown on every chart timeframe (default).\nPick a timeframe to show the feature ONLY when the chart is on that timeframe, e.g. 1 minute = visible on the 1m chart only.")
+tfCHoCH = input.timeframe("", "CHoCH", group = gTF)
+tfMSS   = input.timeframe("", "MSS", group = gTF)
+tfIDM   = input.timeframe("", "IDM", group = gTF)
+tfLiq   = input.timeframe("", "Liquidity & Sweeps", group = gTF,
+     tooltip = "Applies to Swing BSL / SSL, EQH / EQL, PDH / PDL, PWH / PWL, Session High / Low and their sweep marks.")
+tfFVG   = input.timeframe("", "FVG", group = gTF)
+tfIFVG  = input.timeframe("", "IFVG", group = gTF)
 
 // ── Sessions / Killzones ─────────────────────────────────────────────────────────────
 gS          = "Sessions / Killzones"
@@ -156,6 +170,23 @@ tz      = tzIn == "Exchange" ? syminfo.timezone : tzIn == "UTC" ? "GMT+0" : tzIn
 fTxtCol = color.new(chart.fg_color, 40)
 sessBoxStyle = sessBoxSt == "Solid" ? line.style_solid : sessBoxSt == "Dotted" ? line.style_dotted : line.style_dashed
 
+// Timeframe visibility: "" (Chart) = every timeframe, otherwise only that chart timeframe
+f_tfOK(string tf) =>
+    tf == "" or timeframe.in_seconds(tf) == timeframe.in_seconds(timeframe.period)
+
+showBOS     = showBOSIn     and f_tfOK(tfBOS)
+showCHoCH   = showCHoCHIn   and f_tfOK(tfCHoCH)
+showMSS     = showMSSIn     and f_tfOK(tfMSS)
+showIDM     = showIDMIn     and f_tfOK(tfIDM)
+showFVG     = showFVGIn     and f_tfOK(tfFVG)
+showIFVG    = showIFVGIn    and f_tfOK(tfIFVG)
+bool liqTF  = f_tfOK(tfLiq)
+showSwLiq   = showSwLiqIn   and liqTF
+showEQ      = showEQIn      and liqTF
+showPD      = showPDIn      and liqTF
+showPW      = showPWIn      and liqTF
+showSessLiq = showSessLiqIn and liqTF
+
 // =====================================================================================
 // TYPES
 // =====================================================================================
@@ -165,8 +196,9 @@ type Liq
     label lb
     float price
     bool  isHigh
-    color col
-    bool  swept = false
+    color  col
+    bool   swept = false
+    string nm    = ""
 
 // A Fair Value Gap (normal or inverted)
 type FVG
@@ -216,9 +248,9 @@ f_struct(int x1, int x2, float y, string txt, bool bull, color c, string st, int
 f_level(int x1, float p, bool isHigh, string txt, color c, string st) =>
     line  ln = line.new(x1, p, bar_index, p, color = c, style = st, width = 1)
     label lb = na
-    if txt != ""
+    if txt != "" and showLiqNames
         lb := label.new(bar_index, p, txt, color = TRANSP, textcolor = c, style = label.style_label_left, size = size.tiny)
-    Liq.new(ln, lb, p, isHigh, c)
+    Liq.new(ln, lb, p, isHigh, c, nm = txt)
 
 // "✕" marker on the bar where a level gets swept
 f_sweepMark(float p, color c) =>
@@ -234,7 +266,10 @@ f_updateLiq(array<Liq> arr) =>
             if not na(l.lb)
                 l.lb.set_x(bar_index)
             if l.isHigh ? high > l.price : low < l.price
-                f_sweepMark(l.price, l.col)
+                if not na(l.lb)
+                    l.lb.set_text(l.nm + " ✕")
+                else
+                    f_sweepMark(l.price, l.col)
                 arr.remove(i)
     n
 
@@ -448,12 +483,14 @@ var bool  idmBullOn   = false
 var float idmBullLvl  = na
 var int   idmBullBar  = na
 var line  idmBullLn   = na
+var label idmBullLb   = na
 var bool  idmBearWait = false
 var int   idmBearFrom = na
 var bool  idmBearOn   = false
 var float idmBearLvl  = na
 var int   idmBearBar  = na
 var line  idmBearLn   = na
+var label idmBearLb   = na
 
 // Pending CHoCH -> MSS upgrade (break candle turns out to be the middle candle of an FVG)
 var int   pendDir = 0
@@ -493,13 +530,14 @@ if not na(ph)
         label.new(int((prevPHBar + b) / 2), math.max(ph, prevPH), "EQH", color = TRANSP, textcolor = eqCol,
              style = label.style_label_down, size = size.tiny)
     if showSwLiq
-        bsl.push(f_level(b, ph, true, "", bslCol, line.style_dashed))
+        bsl.push(f_level(b, ph, true, "BSL", bslCol, line.style_dashed))
         f_trim(bsl, liqMax)
     // First pullback high after a bearish break -> bearish IDM
     if idmBearWait and b > idmBearFrom
         idmBearLvl  := ph
         idmBearBar  := b
         idmBearLn   := line.new(b, ph, bar_index, ph, color = idmCol, style = line.style_dotted, width = 1)
+        idmBearLb   := label.new(bar_index, ph, "IDM", color = TRANSP, textcolor = idmCol, style = label.style_label_left, size = lblSize)
         idmBearOn   := true
         idmBearWait := false
     prevPH    := ph
@@ -519,13 +557,14 @@ if not na(pl)
         label.new(int((prevPLBar + b) / 2), math.min(pl, prevPL), "EQL", color = TRANSP, textcolor = eqCol,
              style = label.style_label_up, size = size.tiny)
     if showSwLiq
-        ssl.push(f_level(b, pl, false, "", sslCol, line.style_dashed))
+        ssl.push(f_level(b, pl, false, "SSL", sslCol, line.style_dashed))
         f_trim(ssl, liqMax)
     // First pullback low after a bullish break -> bullish IDM
     if idmBullWait and b > idmBullFrom
         idmBullLvl  := pl
         idmBullBar  := b
         idmBullLn   := line.new(b, pl, bar_index, pl, color = idmCol, style = line.style_dotted, width = 1)
+        idmBullLb   := label.new(bar_index, pl, "IDM", color = TRANSP, textcolor = idmCol, style = label.style_label_left, size = lblSize)
         idmBullOn   := true
         idmBullWait := false
     prevPL    := pl
@@ -535,18 +574,19 @@ if not na(pl)
     slOpen    := true
 
 // ── 4) IDM sweeps (wick through the inducement level) ────────────────────────────────
+// The "IDM" name rides on the right end of the line; when swept the line stops and reads "IDM ✕"
 if idmBullOn
     idmBullLn.set_x2(bar_index)
+    idmBullLb.set_x(bar_index)
     if low < idmBullLvl
-        label.new(int((idmBullBar + bar_index) / 2), idmBullLvl, "IDM", color = TRANSP, textcolor = idmCol,
-             style = label.style_label_up, size = lblSize)
+        idmBullLb.set_text("IDM ✕")
         idmBullOn := false
 
 if idmBearOn
     idmBearLn.set_x2(bar_index)
+    idmBearLb.set_x(bar_index)
     if high > idmBearLvl
-        label.new(int((idmBearBar + bar_index) / 2), idmBearLvl, "IDM", color = TRANSP, textcolor = idmCol,
-             style = label.style_label_down, size = lblSize)
+        idmBearLb.set_text("IDM ✕")
         idmBearOn := false
 
 // ── 5) Bullish structure break (candle CLOSE above swing high) ───────────────────────
@@ -577,11 +617,13 @@ if shOpen and close > shPrice
     // IDM bookkeeping
     if idmBearOn
         idmBearLn.delete()
+        idmBearLb.delete()
         idmBearOn := false
     idmBearWait := false
     if showIDM and (not isChoch or idmAfter == "BOS + CHoCH/MSS")
         if idmBullOn
             idmBullLn.delete()
+            idmBullLb.delete()
             idmBullOn := false
         idmBullWait := true
         idmBullFrom := bar_index
@@ -615,11 +657,13 @@ if slOpen and close < slPrice
     // IDM bookkeeping
     if idmBullOn
         idmBullLn.delete()
+        idmBullLb.delete()
         idmBullOn := false
     idmBullWait := false
     if showIDM and (not isChoch or idmAfter == "BOS + CHoCH/MSS")
         if idmBearOn
             idmBearLn.delete()
+            idmBearLb.delete()
             idmBearOn := false
         idmBearWait := true
         idmBearFrom := bar_index
