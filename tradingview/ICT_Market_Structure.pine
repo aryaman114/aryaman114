@@ -88,7 +88,12 @@ liqMax      = input.int(10, "Max Active Levels (per type)", minval = 1, maxval =
 // ── Sessions / Killzones ─────────────────────────────────────────────────────────────
 gS          = "Sessions / Killzones"
 showSessBg  = input.bool(true, "Show Background Shading", group = gS)
-showSessLbl = input.bool(true, "Show Session Names", group = gS)
+showSessBox = input.bool(true, "Show Session Box", inline = "sbx", group = gS)
+sessBoxSt   = input.string("Dashed", "", options = ["Solid", "Dashed", "Dotted"], inline = "sbx", group = gS)
+sessBoxFill = input.bool(true, "Fill", inline = "sbx", group = gS,
+     tooltip = "Box from the session's high to its low, growing live while the session is running. Uses each session's own color.")
+showSessLbl = input.bool(true, "Show Session Names", group = gS,
+     tooltip = "When the session box is on, the name is written inside the box (top-left). Otherwise it is shown above the first candle of the session.")
 tzIn        = input.string("America/New_York", "Timezone",
      options = ["America/New_York", "America/Chicago", "Europe/London", "Europe/Berlin", "Asia/Dubai", "Asia/Kolkata", "Asia/Singapore", "Asia/Tokyo", "Australia/Sydney", "UTC", "Exchange"],
      group = gS, tooltip = "Timezone used for the session times below and for the day / week boundaries. ICT killzones are defined in New York time.")
@@ -149,6 +154,7 @@ s5EA  = input.string("PM", "", options = ["AM", "PM"], inline = "s5b", group = g
 lblSize = lblSizeIn == "Tiny" ? size.tiny : lblSizeIn == "Small" ? size.small : size.normal
 tz      = tzIn == "Exchange" ? syminfo.timezone : tzIn == "UTC" ? "GMT+0" : tzIn
 fTxtCol = color.new(chart.fg_color, 40)
+sessBoxStyle = sessBoxSt == "Solid" ? line.style_solid : sessBoxSt == "Dotted" ? line.style_dotted : line.style_dashed
 
 // =====================================================================================
 // TYPES
@@ -180,6 +186,7 @@ type Sess
     float lo
     int   start
     bool  active = false
+    box   bx
 
 // =====================================================================================
 // FUNCTIONS
@@ -265,12 +272,20 @@ f_session(Sess s, bool inS, string name, color col, array<Liq> arr) =>
             s.hi    := high
             s.lo    := low
             s.start := bar_index
-            if showSessLbl
+            if showSessBox
+                s.bx := box.new(bar_index, high, bar_index, low, border_color = color.new(col, 20), border_style = sessBoxStyle,
+                     bgcolor = sessBoxFill ? col : TRANSP, text = showSessLbl ? name : "", text_size = size.small,
+                     text_color = color.new(col, 0), text_halign = text.align_left, text_valign = text.align_top)
+            else if showSessLbl
                 label.new(bar_index, high, name, yloc = yloc.abovebar, color = TRANSP,
                      textcolor = color.new(col, 0), style = label.style_none, size = size.small)
         else
             s.hi := math.max(s.hi, high)
             s.lo := math.min(s.lo, low)
+            if not na(s.bx)
+                s.bx.set_top(s.hi)
+                s.bx.set_bottom(s.lo)
+                s.bx.set_right(bar_index)
     else if s.active
         ended := true
         if showSessLiq

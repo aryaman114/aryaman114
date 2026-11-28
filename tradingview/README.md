@@ -22,7 +22,7 @@ One overlay indicator for ICT / SMC market structure. Everything runs on the cha
 | **EQH / EQL** | Two swing highs / lows within the tolerance (default 0.1 × ATR). |
 | **PDH / PDL, PWH / PWL** | Previous day / week high and low (in the selected timezone). Turns dotted and is marked ✕ once swept. |
 | **Session High / Low** | High and low of each killzone, extended until swept. |
-| **Sessions / Killzones** | Background shading. Each session has its own toggle, name, color, and start/end time entered as hour : minute + AM/PM. |
+| **Sessions / Killzones** | Background shading and/or a session box (high-to-low range, grows live, border style + fill options, name inside the box). Each session has its own toggle, name, color, and start/end time entered as hour : minute + AM/PM. |
 
 ### Default killzones (New York time)
 | Session | Start | End |
