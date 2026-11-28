@@ -100,6 +100,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 			public double LegExtreme;
 			public int LastReportedFvgBar = -1;
 
+			public int ShowFvgBar = -1;        // first FVG of the leg (third candle), for the chart
+			public double ShowFvgTop, ShowFvgBottom;
+			public bool FvgScanDone;
+
 			public int BreakerBar = -1;        // breaker block candle (-1 = none)
 			public double BreakerTop, BreakerBottom;
 			public bool BreakerReported;
@@ -212,6 +216,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 				RangeBoxBrush = Brushes.DodgerBlue;
 				SweepBoxBrush = Brushes.Orange;
 				BoxOpacity = 10;
+				BreakerBrush = Brushes.MediumPurple;
+				FvgBrush = Brushes.Goldenrod;
+				ZoneOpacity = 25;
+				ShowMidLines = true;
+				MssBrush = Brushes.Magenta;
+				MssLineWidth = 2;
+				MssText = "MSS";
+				MssTextSize = 11;
 			}
 			else if (State == State.Configure)
 			{
@@ -468,13 +480,18 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private void ProcessLtfBar()
 		{
 			int cb = CurrentBars[0];
-
+			ProcessSetup(cb);
 			if (ShowDrawings)
 			{
-				UpdateLevelDrawings();
+				DrawSetup(pending, cb);
+				if (trade != pending)
+					DrawSetup(trade, cb);
 				UpdateStatus();
 			}
+		}
 
+		private void ProcessSetup(int cb)
+		{
 			CrtSetup s = pending;
 			if (s == null || s.State == SetupState.WaitingForWindow || s.State == SetupState.Done)
 				return;
@@ -566,9 +583,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 				s.MssLevel = s.Direction < 0 ? L(i) : H(i);
 				Note(string.Format("{0}: sweep point {1} at {2:MM-dd HH:mm}. MSS level = first swing {3} to its left: {4} ({5:MM-dd HH:mm})",
 					s.Id, P(ext), BarsArray[0].GetTime(anchorBar), s.Direction < 0 ? "low" : "high", P(s.MssLevel), BarsArray[0].GetTime(i)));
-				if (ShowDrawings)
-					Draw.Line(this, TagPrefix + s.Id + "_msslvl", false, BarsArray[0].GetTime(i), s.MssLevel, BarsArray[0].GetTime(anchorBar), s.MssLevel,
-						Brushes.Magenta, DashStyleHelper.Dash, 1);
 				return true;
 			}
 			return false;
@@ -600,17 +614,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 				s.BreakerBar >= 0
 					? "Breaker block " + P(s.BreakerBottom) + "-" + P(s.BreakerTop) + " (0.5 = " + P(RoundPrice((s.BreakerTop + s.BreakerBottom) / 2.0)) + ")."
 					: "No breaker candle found."));
-
-			if (ShowDrawings)
-			{
-				Draw.Line(this, TagPrefix + s.Id + "_mss", false, BarsArray[0].GetTime(s.MssSwingBar), s.MssLevel, mssTime, s.MssLevel,
-					Brushes.Magenta, DashStyleHelper.Solid, 2);
-				Draw.Text(this, TagPrefix + s.Id + "_msst", false, "MSS", mssTime, s.MssLevel, s.Direction < 0 ? -10 : 10,
-					Brushes.Magenta, new SimpleFont("Arial", 10), TextAlignment.Left, Brushes.Transparent, Brushes.Transparent, 0);
-				if (s.BreakerBar >= 0)
-					Draw.Rectangle(this, TagPrefix + s.Id + "_bb", false, BarsArray[0].GetTime(s.BreakerBar), s.BreakerTop, mssTime, s.BreakerBottom,
-						Brushes.MediumPurple, Brushes.MediumPurple, 25);
-			}
 		}
 
 		// After the MSS: breaker block 0.5 has priority; the first FVG is used only when there is no valid breaker.
@@ -637,36 +640,50 @@ namespace NinjaTrader.NinjaScript.Strategies
 				PlaceEntry(s, pick);
 		}
 
+		// FVG whose third candle is bar j, inside the premium half (sell) / discount half (buy) of the
+		// sweep -> MSS leg. Returns false with reason = null when there is no FVG at j.
+		private bool FvgAt(CrtSetup s, int j, out double top, out double bottom, out string reason)
+		{
+			reason = null;
+			if (s.Direction < 0)
+			{
+				top = L(j - 2);        // bearish FVG: candle 1 low above candle 3 high
+				bottom = H(j);
+			}
+			else
+			{
+				top = L(j);            // bullish FVG: candle 3 low above candle 1 high
+				bottom = H(j - 2);
+			}
+			if (top - bottom < MinFvgTicks * TickSize - 1e-9) return false;
+
+			double legMid = (s.LegExtreme + s.MssLevel) / 2.0;
+			double mid = (top + bottom) / 2.0;
+			if (s.Direction < 0 ? mid <= legMid : mid >= legMid)
+			{
+				reason = "not in the " + (s.Direction < 0 ? "premium" : "discount") + " half of the sweep -> MSS leg";
+				return false;
+			}
+			return true;
+		}
+
 		// FIRST FVG of the sweep -> MSS leg, in its premium half (sell) / discount half (buy).
 		// FVGs whose middle candle is at most one bar after the MSS candle count (same displacement).
 		private EntryCandidate FindFvgEntry(CrtSetup s, int cb)
 		{
-			double legMid = (s.LegExtreme + s.MssLevel) / 2.0;
 			int firstJ = Math.Max(s.AnchorBar + 2, 2);
 			int lastJ = Math.Min(cb, s.MssBar + 2);
 			for (int j = firstJ; j <= lastJ; j++)
 			{
 				double top, bottom;
-				if (s.Direction < 0)
-				{
-					top = L(j - 2);        // bearish FVG: candle 1 low above candle 3 high
-					bottom = H(j);
-				}
-				else
-				{
-					top = L(j);            // bullish FVG: candle 3 low above candle 1 high
-					bottom = H(j - 2);
-				}
-				if (top - bottom < MinFvgTicks * TickSize - 1e-9) continue;
-
-				double mid = (top + bottom) / 2.0;
 				string reason;
-				if (s.Direction < 0 ? mid <= legMid : mid >= legMid)
+				if (!FvgAt(s, j, out top, out bottom, out reason))
 				{
-					reason = "not in the " + (s.Direction < 0 ? "premium" : "discount") + " half of the sweep -> MSS leg";
+					if (reason == null) continue;   // no FVG at this candle
 				}
 				else
 				{
+					double mid = (top + bottom) / 2.0;
 					bool mitigated = false;
 					for (int k = j + 1; k <= cb; k++)
 					{
@@ -789,10 +806,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 				"{0}: {1} LIMIT {2} lot(s) @ {3} ({4} 0.5, zone {5}-{6})  SL {7}  TP1 {8}{9}  risk ${10:0.00}/lot",
 				s.Id, s.Direction > 0 ? "BUY" : "SELL", c.Lots, P(c.Entry), c.Model, P(c.Bottom), P(c.Top), P(s.StopPrice), P(c.Target1),
 				c.Lots == 2 ? "  TP2 " + P(c.Target2) : "", c.RiskPerLot));
-
-			if (ShowDrawings)
-				Draw.Rectangle(this, TagPrefix + s.Id + "_zone", false, BarsArray[0].GetTime(c.FirstBar), c.Top, Times[0][0], c.Bottom,
-					c.Model == "FVG" ? Brushes.Goldenrod : Brushes.MediumPurple, c.Model == "FVG" ? Brushes.Goldenrod : Brushes.MediumPurple, 40);
 		}
 
 		// Orders are sent from the 1-minute series so that, in backtests, they can only fill on
@@ -996,16 +1009,45 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 		#region Drawing / status
 
-		private void UpdateLevelDrawings()
+		// Range levels, MSS, breaker block, first FVG (each with its 0.5 line) and order levels.
+		// Redrawn every lower-timeframe bar while the setup is active, so zones extend to the current bar.
+		private void DrawSetup(CrtSetup s, int cb)
 		{
-			CrtSetup s = trade ?? pending;
-			if (s == null) return;
+			if (s == null || s.State == SetupState.WaitingForWindow || s.State == SetupState.Done) return;
 			DateTime now = Times[0][0];
 			string id = TagPrefix + s.Id;
 
 			Draw.Line(this, id + "_rh", false, s.Range.FirstBarTime, s.RangeHigh, now, s.RangeHigh, RangeBoxBrush, DashStyleHelper.Solid, 1);
 			Draw.Line(this, id + "_rl", false, s.Range.FirstBarTime, s.RangeLow, now, s.RangeLow, RangeBoxBrush, DashStyleHelper.Solid, 1);
 			Draw.Line(this, id + "_rm", false, s.Range.FirstBarTime, s.RangeMid, now, s.RangeMid, Brushes.Gray, DashStyleHelper.Dash, 1);
+
+			// MSS: dashed level while waiting for the break, solid line + text once it is broken
+			if (s.MssSwingBar >= 0)
+			{
+				DateTime swingTime = BarsArray[0].GetTime(s.MssSwingBar);
+				if (s.MssBar < 0)
+				{
+					Draw.Line(this, id + "_mss", false, swingTime, s.MssLevel, now, s.MssLevel, MssBrush, DashStyleHelper.Dash, 1);
+				}
+				else
+				{
+					Draw.Line(this, id + "_mss", false, swingTime, s.MssLevel, BarsArray[0].GetTime(s.MssBar), s.MssLevel,
+						MssBrush, DashStyleHelper.Solid, MssLineWidth);
+					if (!string.IsNullOrWhiteSpace(MssText))
+						Draw.Text(this, id + "_msst", false, MssText, BarsArray[0].GetTime((s.MssSwingBar + s.MssBar) / 2), s.MssLevel,
+							s.Direction < 0 ? -(MssTextSize + 4) : MssTextSize + 4, MssBrush, new SimpleFont("Arial", MssTextSize),
+							TextAlignment.Center, Brushes.Transparent, Brushes.Transparent, 0);
+				}
+			}
+
+			if (s.BreakerBar >= 0)
+				DrawZone(id + "_bb", s.BreakerBar, s.BreakerTop, s.BreakerBottom, now, BreakerBrush);
+
+			FindFirstFvgForDisplay(s, cb);
+			if (s.ShowFvgBar >= 0)
+				DrawZone(id + "_fvg", s.ShowFvgBar - 2, s.ShowFvgTop, s.ShowFvgBottom, now, FvgBrush);
+			if (s.EntryModelUsed == "FVG" && s.ZoneFirstBar != s.ShowFvgBar - 2)   // entry used a later FVG
+				DrawZone(id + "_zone", s.ZoneFirstBar, s.ZoneTop, s.ZoneBottom, now, FvgBrush);
 
 			if (s.State == SetupState.OrderWorking || s.State == SetupState.InTrade)
 			{
@@ -1015,6 +1057,39 @@ namespace NinjaTrader.NinjaScript.Strategies
 				if (s.Lots == 2)
 					Draw.Line(this, id + "_tp2", false, s.OrderTime, s.Lot2Target, now, s.Lot2Target, Brushes.LimeGreen, DashStyleHelper.Solid, 2);
 			}
+		}
+
+		// Zone box from its first candle to `end`, plus its 0.5 midpoint line.
+		private void DrawZone(string tag, int firstBar, double top, double bottom, DateTime end, Brush brush)
+		{
+			DateTime start = BarsArray[0].GetTime(firstBar);
+			Draw.Rectangle(this, tag, false, start, top, end, bottom, brush, brush, ZoneOpacity);
+			if (ShowMidLines)
+			{
+				double mid = RoundPrice((top + bottom) / 2.0);
+				Draw.Line(this, tag + "_mid", false, start, mid, end, mid, brush, DashStyleHelper.Dash, 2);
+			}
+		}
+
+		// The first FVG of the sweep -> MSS leg, shown on the chart even when the breaker is used for the entry.
+		private void FindFirstFvgForDisplay(CrtSetup s, int cb)
+		{
+			if (s.MssBar < 0 || s.FvgScanDone || s.ShowFvgBar >= 0) return;
+			int lastJ = Math.Min(cb, s.MssBar + 2);
+			for (int j = Math.Max(s.AnchorBar + 2, 2); j <= lastJ; j++)
+			{
+				double top, bottom;
+				string reason;
+				if (FvgAt(s, j, out top, out bottom, out reason))
+				{
+					s.ShowFvgBar = j;
+					s.ShowFvgTop = top;
+					s.ShowFvgBottom = bottom;
+					break;
+				}
+			}
+			if (cb >= s.MssBar + 2)
+				s.FvgScanDone = true;
 		}
 
 		private void UpdateStatus()
@@ -1243,6 +1318,57 @@ namespace NinjaTrader.NinjaScript.Strategies
 		[Range(0, 100)]
 		[Display(Name = "Box fill opacity (%)", Description = "0 = outline only, 100 = solid.", Order = 5, GroupName = "5. Display")]
 		public int BoxOpacity { get; set; }
+
+		[XmlIgnore]
+		[Display(Name = "Breaker block colour", Order = 6, GroupName = "5. Display")]
+		public Brush BreakerBrush { get; set; }
+
+		[Browsable(false)]
+		public string BreakerBrushSerializable
+		{
+			get { return Serialize.BrushToString(BreakerBrush); }
+			set { BreakerBrush = Serialize.StringToBrush(value); }
+		}
+
+		[XmlIgnore]
+		[Display(Name = "FVG colour", Order = 7, GroupName = "5. Display")]
+		public Brush FvgBrush { get; set; }
+
+		[Browsable(false)]
+		public string FvgBrushSerializable
+		{
+			get { return Serialize.BrushToString(FvgBrush); }
+			set { FvgBrush = Serialize.StringToBrush(value); }
+		}
+
+		[Range(0, 100)]
+		[Display(Name = "Breaker / FVG fill opacity (%)", Order = 8, GroupName = "5. Display")]
+		public int ZoneOpacity { get; set; }
+
+		[Display(Name = "Show 0.5 midpoint lines", Description = "Dashed line at the 0.5 level of the breaker block and of the FVG.", Order = 9, GroupName = "5. Display")]
+		public bool ShowMidLines { get; set; }
+
+		[XmlIgnore]
+		[Display(Name = "MSS line colour", Order = 10, GroupName = "5. Display")]
+		public Brush MssBrush { get; set; }
+
+		[Browsable(false)]
+		public string MssBrushSerializable
+		{
+			get { return Serialize.BrushToString(MssBrush); }
+			set { MssBrush = Serialize.StringToBrush(value); }
+		}
+
+		[Range(1, 10)]
+		[Display(Name = "MSS line width", Order = 11, GroupName = "5. Display")]
+		public int MssLineWidth { get; set; }
+
+		[Display(Name = "MSS text", Description = "Text written on the MSS line. Leave empty for no text.", Order = 12, GroupName = "5. Display")]
+		public string MssText { get; set; }
+
+		[Range(6, 30)]
+		[Display(Name = "MSS text size", Order = 13, GroupName = "5. Display")]
+		public int MssTextSize { get; set; }
 
 		#endregion
 	}

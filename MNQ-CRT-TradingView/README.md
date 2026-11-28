@@ -61,12 +61,18 @@ Pick **"Order fills and alert() function calls"** to also get every fill.
 | | Show drawings / status table | On |
 | | CRT range box colour + fill | Blue (fill 90% transparent) |
 | | Sweep candle box colour + fill | Orange (fill 90% transparent) |
+| Breaker / FVG / MSS drawing | Breaker block colour + fill | Purple |
+| | FVG colour + fill | Teal |
+| | Show 0.5 midpoint lines (breaker + FVG) | On |
+| | MSS line colour + width | Pink, 2 |
+| | MSS text + size | "MSS", small (leave the text empty for no text) |
 
 **Chart colours:**
 * Range candle box and its high/low lines: **your range colour** (default blue). Sweep candle box: **your sweep colour** (default orange). Change both under *Session / Display* in the settings.
 * Grey dashed line: 50% of the range.
-* Pink dashed line: MSS level (swing left of the sweep). Solid pink line + "MSS": the break.
-* Purple box: breaker block. Orange zone: FVG used for the entry.
+* MSS: a dashed line at the swing left of the sweep while waiting, then a solid line from that swing to the MSS candle with your text (default pink, "MSS").
+* Breaker block box (default purple) and first FVG box (default teal), each with a dashed **0.5 midpoint line**. The FVG is shown even when the breaker is used for the entry.
+* Change any of these colours under *Breaker / FVG / MSS drawing* in the settings.
 * Aqua line: entry. Red line: stop. Green lines: targets.
 
 ## Differences from the NinjaTrader version

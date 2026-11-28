@@ -127,11 +127,19 @@ Standard MNQ 4H candles in New York time start at **6 PM, 10 PM, 2 AM, 6 AM, 10 
 | Setting | Default | Meaning |
 |---|---|---|
 | Flatten before weekend | true | Friday 4:45 PM New York: cancel entries and close any open position. |
-| Show drawings | true | Draws the range box, sweep box, MSS level and MSS line (magenta), breaker block (purple), FVG used for entry (gold), and entry/SL/TP lines, plus a status line at the top-left. |
+| Show drawings | true | Draws the range box, sweep box, MSS level and MSS line, breaker block, first FVG (each with a dashed 0.5 midpoint line), and entry/SL/TP lines, plus a status line at the top-left. |
 | Print log | true | Writes every decision to the NinjaScript Output window. |
 | CRT range box colour | DodgerBlue | Colour of the range candle box and its high/low lines. |
 | Sweep candle box colour | Orange | Colour of the sweep candle box and the CRT label. |
 | Box fill opacity (%) | 10 | 0 = outline only, 100 = solid fill. |
+| Breaker block colour | MediumPurple | Breaker box and its 0.5 midpoint line. |
+| FVG colour | Goldenrod | First-FVG box and its 0.5 midpoint line. |
+| Breaker / FVG fill opacity (%) | 25 | Fill of the breaker and FVG boxes. |
+| Show 0.5 midpoint lines | true | Dashed line at the 0.5 level of the breaker block and of the FVG. |
+| MSS line colour | Magenta | The dashed MSS level (while waiting) and the solid MSS line (after the break). |
+| MSS line width | 2 | 1–10. |
+| MSS text | MSS | Text written on the MSS line. Leave empty for no text. |
+| MSS text size | 11 | Font size of the MSS text. |
 
 ---
 

@@ -55,6 +55,17 @@ color  rangeFillCol   = input.color(color.new(color.blue, 90), "fill", group = G
 color  sweepLineCol   = input.color(color.orange, "Sweep candle box", group = G4, inline = "sb")
 color  sweepFillCol   = input.color(color.new(color.orange, 90), "fill", group = G4, inline = "sb")
 
+G5 = "5. Breaker / FVG / MSS drawing"
+color  bbLineCol   = input.color(color.purple, "Breaker block", group = G5, inline = "bb")
+color  bbFillCol   = input.color(color.new(color.purple, 80), "fill", group = G5, inline = "bb")
+color  fvgLineCol  = input.color(color.teal, "FVG", group = G5, inline = "fvg")
+color  fvgFillCol  = input.color(color.new(color.teal, 80), "fill", group = G5, inline = "fvg")
+bool   showMid     = input.bool(true, "Show 0.5 midpoint lines (breaker + FVG)", group = G5)
+color  mssCol      = input.color(color.fuchsia, "MSS line", group = G5, inline = "mss")
+int    mssWidth    = input.int(2, "width", minval = 1, maxval = 5, group = G5, inline = "mss")
+string mssText     = input.string("MSS", "MSS text", group = G5, inline = "msst", tooltip = "Text written on the MSS line. Leave empty for no text.")
+string mssTextSize = input.string("small", "size", options = ["tiny", "small", "normal", "large"], group = G5, inline = "msst")
+
 // ═════════════════════════════ Constants ═════════════════════════════
 string NY          = "America/New_York"
 int    HTF_MS      = 240 * 60 * 1000
@@ -120,6 +131,16 @@ type Setup
     line   lnStop
     line   lnTp1
     line   lnTp2
+    line   mssLn
+    label  mssLb
+    box    bbBox
+    line   bbMidLn
+    int    fvgBar = -1
+    bool   fvgScanDone = false
+    box    fvgBox
+    line   fvgMidLn
+    box    zoneBox
+    line   zoneMidLn
 
 // ═════════════════════════════ Helpers ═════════════════════════════
 fmt(float p) =>
@@ -127,6 +148,18 @@ fmt(float p) =>
 
 dirName(int d) =>
     d > 0 ? "BUY" : "SELL"
+
+mssSize() =>
+    mssTextSize == "tiny" ? size.tiny : mssTextSize == "normal" ? size.normal : mssTextSize == "large" ? size.large : size.small
+
+// Zone box from `left` to the current bar, plus its 0.5 midpoint line. Returns [box, midline].
+drawZone(int left, float top, float bot, color lc, color fc) =>
+    box b = box.new(left, top, bar_index, bot, border_color = lc, bgcolor = fc)
+    line m = na
+    if showMid
+        float mid = math.round_to_mintick((top + bot) / 2)
+        m := line.new(left, mid, bar_index, mid, color = lc, style = line.style_dashed, width = 2)
+    [b, m]
 
 // Entry at the 0.5 level of a zone (FVG or breaker block).
 // Returns [lots, entry, tp1, tp2, riskPerLot, reason]; lots = 0 means not valid.
@@ -247,7 +280,7 @@ markMssLevel(Setup s) =>
     if found
         log.info("{0}: sweep point {1}. MSS level = first swing {2} to its left: {3}", s.id, fmt(s.legExt), s.dir < 0 ? "low" : "high", fmt(s.mssLvl))
         if showDraw
-            line.new(s.swingBar, s.mssLvl, s.anchorBar, s.mssLvl, color = color.fuchsia, style = line.style_dashed)
+            s.mssLn := line.new(s.swingBar, s.mssLvl, bar_index, s.mssLvl, color = mssCol, style = line.style_dashed)
     found
 
 // MSS confirmed on the candle `mssOff` bars ago: find the breaker block and mark the MSS.
@@ -278,10 +311,65 @@ confirmMss(Setup s, int mssOff) =>
     string bbTxt = s.bbBar >= 0 ? "Breaker block " + fmt(s.bbBot) + "-" + fmt(s.bbTop) + " (0.5 = " + fmt(math.round_to_mintick((s.bbTop + s.bbBot) / 2)) + ")" : "No breaker candle found"
     log.info("{0}: {1} MSS confirmed - close {2} beyond {3}. {4}", s.id, s.dir < 0 ? "bearish" : "bullish", fmt(close[mssOff]), fmt(s.mssLvl), bbTxt)
     if showDraw
-        line.new(s.swingBar, s.mssLvl, s.mssBar, s.mssLvl, color = color.fuchsia, width = 2)
-        label.new(s.mssBar, s.mssLvl, "MSS", color = color.new(color.fuchsia, 100), textcolor = color.fuchsia, style = s.dir < 0 ? label.style_label_up : label.style_label_down, size = size.small)
+        // MSS: solid line from the broken swing to the MSS candle, with your text in the middle
+        if not na(s.mssLn)
+            line.delete(s.mssLn)
+        s.mssLn := line.new(s.swingBar, s.mssLvl, s.mssBar, s.mssLvl, color = mssCol, width = mssWidth)
+        if mssText != ""
+            s.mssLb := label.new(math.round((s.swingBar + s.mssBar) / 2.0), s.mssLvl, mssText, color = color.new(color.white, 100), textcolor = mssCol, style = s.dir < 0 ? label.style_label_up : label.style_label_down, size = mssSize())
         if s.bbBar >= 0
-            box.new(s.bbBar, s.bbTop, s.mssBar, s.bbBot, border_color = color.purple, bgcolor = color.new(color.purple, 80))
+            [bx, ml] = drawZone(s.bbBar, s.bbTop, s.bbBot, bbLineCol, bbFillCol)
+            s.bbBox   := bx
+            s.bbMidLn := ml
+    true
+
+// First FVG of the sweep -> MSS leg (premium half sells / discount half buys), drawn with its 0.5 line
+// even when the breaker block is used for the entry.
+showFirstFvg(Setup s) =>
+    if showDraw and s.mssBar >= 0 and s.anchorBar >= 0 and not s.fvgScanDone and s.fvgBar < 0
+        int hiOff = math.min(bar_index - (s.anchorBar + 2), MAX_SCAN)
+        int loOff = math.max(0, bar_index - (s.mssBar + 2))
+        if hiOff >= loOff
+            float legMid = (s.legExt + s.mssLvl) / 2
+            for t = 0 to hiOff - loOff
+                int fo = hiOff - t
+                float top = s.dir < 0 ? low[fo + 2] : low[fo]
+                float bot = s.dir < 0 ? high[fo] : high[fo + 2]
+                float mid = (top + bot) / 2
+                if top - bot >= minFvgTicks * tick - tick * 0.01 and ((s.dir < 0 and mid > legMid) or (s.dir > 0 and mid < legMid))
+                    s.fvgBar := bar_index - fo
+                    [bx, ml] = drawZone(bar_index - fo - 2, top, bot, fvgLineCol, fvgFillCol)
+                    s.fvgBox   := bx
+                    s.fvgMidLn := ml
+                    break
+        if bar_index >= s.mssBar + 2
+            s.fvgScanDone := true
+    true
+
+// Keep the setup's zones and lines reaching the current bar while it is active.
+extendDrawings(Setup s) =>
+    if not na(s.bbBox)
+        box.set_right(s.bbBox, bar_index)
+    if not na(s.bbMidLn)
+        line.set_x2(s.bbMidLn, bar_index)
+    if not na(s.fvgBox)
+        box.set_right(s.fvgBox, bar_index)
+    if not na(s.fvgMidLn)
+        line.set_x2(s.fvgMidLn, bar_index)
+    if not na(s.zoneBox)
+        box.set_right(s.zoneBox, bar_index)
+    if not na(s.zoneMidLn)
+        line.set_x2(s.zoneMidLn, bar_index)
+    if s.mssBar < 0 and not na(s.mssLn)
+        line.set_x2(s.mssLn, bar_index)
+    if not na(s.lnEntry)
+        line.set_x2(s.lnEntry, bar_index)
+    if not na(s.lnStop)
+        line.set_x2(s.lnStop, bar_index)
+    if not na(s.lnTp1)
+        line.set_x2(s.lnTp1, bar_index)
+    if not na(s.lnTp2)
+        line.set_x2(s.lnTp2, bar_index)
     true
 
 // Breaker block found at the MSS, unless price already came back to its 0.5 level.
@@ -489,6 +577,9 @@ if (pend.state == 2 or pend.state == 3) and time >= pend.winStart and time < pen
         if pend.state == 2 and pend.anchorBar >= 0 and ((pend.dir < 0 and close < pend.mssLvl) or (pend.dir > 0 and close > pend.mssLvl))
             confirmMss(pend, 0)
 
+        if pend.state == 3
+            showFirstFvg(pend)
+
         // entry
         if pend.state == 3 and canPlace
             if strategy.position_size != 0 or trd.state != 0
@@ -527,8 +618,10 @@ if (pend.state == 2 or pend.state == 3) and time >= pend.winStart and time < pen
                     log.info("{0}: {1} LIMIT {2} lot(s) @ {3} ({4} 0.5, zone {5}-{6})  SL {7}  TP1 {8}{9}  risk ${10}/lot", pend.id, dirName(pend.dir), pend.lots, fmt(pend.entry), pend.model, fmt(zBot), fmt(zTop), fmt(pend.stopPx), fmt(pend.tp1), tp2Txt, str.tostring(rpl, "#.##"))
                     alert(pend.id + ": " + dirName(pend.dir) + " limit " + str.tostring(pend.lots) + " lot(s) @ " + fmt(pend.entry) + " SL " + fmt(pend.stopPx) + " TP1 " + fmt(pend.tp1) + tp2Txt, alert.freq_once_per_bar_close)
                     if showDraw
-                        color zc = useF ? color.orange : color.purple
-                        box.new(zLeft, zTop, bar_index, zBot, border_color = zc, bgcolor = color.new(zc, 70))
+                        if useF and zLeft != pend.fvgBar - 2      // entry used a later FVG than the one shown
+                            [zb, zm] = drawZone(zLeft, zTop, zBot, fvgLineCol, fvgFillCol)
+                            pend.zoneBox   := zb
+                            pend.zoneMidLn := zm
                         pend.lnEntry := line.new(bar_index, pend.entry, bar_index + 1, pend.entry, color = color.aqua, width = 2)
                         pend.lnStop  := line.new(bar_index, pend.stopPx, bar_index + 1, pend.stopPx, color = color.red, width = 2)
                         pend.lnTp1   := line.new(bar_index, pend.tp1, bar_index + 1, pend.tp1, color = color.lime, style = line.style_dashed, width = 2)
@@ -556,15 +649,12 @@ if not cur.closed and time_close >= cur.endT
     prev := cur
 
 // ═════════════════════════════ Drawings / status ═════════════════════════════
-if showDraw and (trd.state == 4 or trd.state == 5)
-    if not na(trd.lnEntry)
-        line.set_x2(trd.lnEntry, bar_index)
-    if not na(trd.lnStop)
-        line.set_x2(trd.lnStop, bar_index)
-    if not na(trd.lnTp1)
-        line.set_x2(trd.lnTp1, bar_index)
-    if not na(trd.lnTp2)
-        line.set_x2(trd.lnTp2, bar_index)
+if showDraw
+    if pend.state == 2 or pend.state == 3
+        extendDrawings(pend)
+    if trd.state == 4 or trd.state == 5
+        showFirstFvg(trd)
+        extendDrawings(trd)
 
 var table tbl = table.new(position.top_right, 1, 3, bgcolor = color.new(color.black, 25), border_width = 1)
 if showTable and barstate.islast
