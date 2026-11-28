@@ -40,7 +40,7 @@ gIDM     = "Inducement (IDM)"
 showIDMIn = input.bool(true, "Show IDM", inline = "idm", group = gIDM)
 idmCol   = input.color(#9598A1, "", inline = "idm", group = gIDM)
 idmAfter = input.string("BOS only", "Mark IDM After", options = ["BOS only", "BOS + CHoCH/MSS"], group = gIDM,
-     tooltip = "IDM = the FIRST pullback swing that forms after a structure break (a swing low after a bullish break, a swing high after a bearish break). It is drawn as a dotted line and labeled 'IDM' when price sweeps it.")
+     tooltip = "IDM = the FIRST pullback swing that forms after a structure break (a swing low after a bullish break, a swing high after a bearish break). It is drawn as a dotted line named 'IDM'; when price sweeps it the line stops and reads 'IDM ✕'.")
 
 // ── Swing High / Low ─────────────────────────────────────────────────────────────────
 gSW       = "Swing High / Low"
