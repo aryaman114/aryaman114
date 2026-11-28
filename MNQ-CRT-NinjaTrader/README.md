@@ -5,6 +5,8 @@ It trades both the buy model and the sell model.
 
 File: [`Strategies/MnqCrtStrategy.cs`](Strategies/MnqCrtStrategy.cs)
 
+A TradingView (Pine Script) version with the same rules is in [`../MNQ-CRT-TradingView`](../MNQ-CRT-TradingView).
+
 ---
 
 ## 1. How the strategy trades
