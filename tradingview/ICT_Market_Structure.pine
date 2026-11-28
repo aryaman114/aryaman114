@@ -1,0 +1,648 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=6
+indicator("ICT Market Structure [BOS • CHoCH • MSS • IDM • FVG • Liquidity • Killzones]", shorttitle = "ICT Market Structure",
+     overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// =====================================================================================
+// CONSTANTS
+// =====================================================================================
+TRANSP   = color.new(color.black, 100)
+MODE_TAP = "Until Tapped"
+MODE_SES = "Until Session End"
+MODE_DAY = "Until Day End"
+
+// =====================================================================================
+// INPUTS
+// =====================================================================================
+
+// ── Market Structure ─────────────────────────────────────────────────────────────────
+gMS        = "Market Structure (BOS / CHoCH / MSS)"
+pLen       = input.int(5, "Swing Pivot Length", minval = 1, maxval = 50, group = gMS,
+     tooltip = "Number of bars on EACH side needed to confirm a swing high / low on the chart's timeframe. All structure breaks are confirmed on candle CLOSE.")
+showBOS    = input.bool(true, "BOS", inline = "ms", group = gMS)
+showCHoCH  = input.bool(true, "CHoCH", inline = "ms", group = gMS)
+showMSS    = input.bool(true, "MSS", inline = "ms", group = gMS)
+bullCol    = input.color(#089981, "Bullish", inline = "mscol", group = gMS)
+bearCol    = input.color(#F23645, "Bearish", inline = "mscol", group = gMS)
+mssRule    = input.string("Large Body or FVG", "MSS Displacement Rule", options = ["Large Body", "FVG", "Large Body or FVG"], group = gMS,
+     tooltip = "MSS = a CHoCH whose breaking move shows displacement.\n• Large Body: the break candle's body is ≥ multiplier × ATR(14).\n• FVG: the break leaves a Fair Value Gap (break candle is candle 2 or 3 of the gap).")
+dispMult   = input.float(1.5, "Large Body Multiplier (× ATR)", minval = 0.1, step = 0.1, group = gMS)
+mssBullCol = input.color(#2962FF, "MSS Bullish", inline = "msscol", group = gMS)
+mssBearCol = input.color(#FF6D00, "MSS Bearish", inline = "msscol", group = gMS)
+lblSizeIn  = input.string("Small", "Label Size", options = ["Tiny", "Small", "Normal"], group = gMS)
+
+// ── Inducement ───────────────────────────────────────────────────────────────────────
+gIDM     = "Inducement (IDM)"
+showIDM  = input.bool(true, "Show IDM", inline = "idm", group = gIDM)
+idmCol   = input.color(#9598A1, "", inline = "idm", group = gIDM)
+idmAfter = input.string("BOS only", "Mark IDM After", options = ["BOS only", "BOS + CHoCH/MSS"], group = gIDM,
+     tooltip = "IDM = the FIRST pullback swing that forms after a structure break (a swing low after a bullish break, a swing high after a bearish break). It is drawn as a dotted line and labeled 'IDM' when price sweeps it.")
+
+// ── Swing High / Low ─────────────────────────────────────────────────────────────────
+gSW       = "Swing High / Low"
+showSwing = input.bool(true, "Show Swing Labels (HH / LH / HL / LL)", group = gSW)
+swHiCol   = input.color(#F23645, "Swing High", inline = "swc", group = gSW)
+swLoCol   = input.color(#089981, "Swing Low", inline = "swc", group = gSW)
+
+// ── FVG / IFVG ───────────────────────────────────────────────────────────────────────
+gF          = "Fair Value Gaps (FVG / IFVG)"
+showFVG     = input.bool(true, "Show FVG", group = gF)
+fvgMode     = input.string(MODE_TAP, "FVG Extend", options = [MODE_TAP, MODE_SES, MODE_DAY], group = gF,
+     tooltip = "• Until Tapped: the box stops at the first candle that trades back into it.\n• Until Session End: the box extends until the current (or next) enabled killzone ends.\n• Until Day End: the box extends until midnight in the selected timezone.\nIn every mode, a candle CLOSE fully through an FVG turns it into an IFVG.")
+fvgBullCol  = input.color(color.new(#089981, 80), "Bullish", inline = "fc", group = gF)
+fvgBearCol  = input.color(color.new(#F23645, 80), "Bearish", inline = "fc", group = gF)
+showIFVG    = input.bool(true, "Show IFVG (Inverted FVG)", group = gF)
+ifvgMode    = input.string(MODE_TAP, "IFVG Extend", options = [MODE_TAP, MODE_SES, MODE_DAY], group = gF,
+     tooltip = "Same options as FVG. An IFVG also ends if price closes back through it. 'Until Tapped' only counts a tap after price has first moved away from the zone.")
+ifvgBullCol = input.color(color.new(#2962FF, 80), "Bullish", inline = "ifc", group = gF)
+ifvgBearCol = input.color(color.new(#FF9800, 80), "Bearish", inline = "ifc", group = gF)
+fvgMinAtr   = input.float(0.0, "Min Gap Size (× ATR)", minval = 0.0, step = 0.05, group = gF,
+     tooltip = "Ignore gaps smaller than this multiple of ATR(14). 0 = show every gap.")
+fvgMax      = input.int(20, "Max Tracked Gaps", minval = 1, maxval = 100, group = gF)
+showFText   = input.bool(true, "Show Box Text", group = gF)
+
+// ── Liquidity ────────────────────────────────────────────────────────────────────────
+gL          = "Liquidity"
+showSwLiq   = input.bool(true, "Swing BSL / SSL", inline = "l1", group = gL)
+bslCol      = input.color(#F7525F, "BSL", inline = "l1", group = gL)
+sslCol      = input.color(#22AB94, "SSL", inline = "l1", group = gL)
+showEQ      = input.bool(true, "Equal Highs / Lows", inline = "l2", group = gL)
+eqCol       = input.color(#00BCD4, "", inline = "l2", group = gL)
+eqTol       = input.float(0.1, "EQH / EQL Tolerance (× ATR)", minval = 0.0, step = 0.01, group = gL)
+showPD      = input.bool(true, "Previous Day High / Low", inline = "l3", group = gL)
+pdCol       = input.color(#FF9800, "", inline = "l3", group = gL)
+showPW      = input.bool(true, "Previous Week High / Low", inline = "l4", group = gL)
+pwCol       = input.color(#E040FB, "", inline = "l4", group = gL)
+showSessLiq = input.bool(true, "Session High / Low", group = gL,
+     tooltip = "High and low of each enabled killzone, extended until swept. Uses each session's own color.")
+liqMax      = input.int(10, "Max Active Levels (per type)", minval = 1, maxval = 50, group = gL)
+
+// ── Sessions / Killzones ─────────────────────────────────────────────────────────────
+gS          = "Sessions / Killzones"
+showSessBg  = input.bool(true, "Show Background Shading", group = gS)
+showSessLbl = input.bool(true, "Show Session Names", group = gS)
+tzIn        = input.string("America/New_York", "Timezone",
+     options = ["America/New_York", "America/Chicago", "Europe/London", "Europe/Berlin", "Asia/Dubai", "Asia/Kolkata", "Asia/Singapore", "Asia/Tokyo", "Australia/Sydney", "UTC", "Exchange"],
+     group = gS, tooltip = "Timezone used for the session times below and for the day / week boundaries. ICT killzones are defined in New York time.")
+
+s1On  = input.bool(true, "", inline = "s1", group = gS)
+s1Nm  = input.string("Asia", "", inline = "s1", group = gS)
+s1Col = input.color(color.new(#2962FF, 90), "", inline = "s1", group = gS)
+s1SH  = input.int(8, "    Start", minval = 1, maxval = 12, inline = "s1a", group = gS)
+s1SM  = input.int(0, ":", minval = 0, maxval = 59, inline = "s1a", group = gS)
+s1SA  = input.string("PM", "", options = ["AM", "PM"], inline = "s1a", group = gS)
+s1EH  = input.int(12, "    End  ", minval = 1, maxval = 12, inline = "s1b", group = gS)
+s1EM  = input.int(0, ":", minval = 0, maxval = 59, inline = "s1b", group = gS)
+s1EA  = input.string("AM", "", options = ["AM", "PM"], inline = "s1b", group = gS)
+
+s2On  = input.bool(true, "", inline = "s2", group = gS)
+s2Nm  = input.string("London", "", inline = "s2", group = gS)
+s2Col = input.color(color.new(#F23645, 90), "", inline = "s2", group = gS)
+s2SH  = input.int(2, "    Start", minval = 1, maxval = 12, inline = "s2a", group = gS)
+s2SM  = input.int(0, ":", minval = 0, maxval = 59, inline = "s2a", group = gS)
+s2SA  = input.string("AM", "", options = ["AM", "PM"], inline = "s2a", group = gS)
+s2EH  = input.int(5, "    End  ", minval = 1, maxval = 12, inline = "s2b", group = gS)
+s2EM  = input.int(0, ":", minval = 0, maxval = 59, inline = "s2b", group = gS)
+s2EA  = input.string("AM", "", options = ["AM", "PM"], inline = "s2b", group = gS)
+
+s3On  = input.bool(true, "", inline = "s3", group = gS)
+s3Nm  = input.string("NY AM", "", inline = "s3", group = gS)
+s3Col = input.color(color.new(#089981, 90), "", inline = "s3", group = gS)
+s3SH  = input.int(9, "    Start", minval = 1, maxval = 12, inline = "s3a", group = gS)
+s3SM  = input.int(30, ":", minval = 0, maxval = 59, inline = "s3a", group = gS)
+s3SA  = input.string("AM", "", options = ["AM", "PM"], inline = "s3a", group = gS)
+s3EH  = input.int(11, "    End  ", minval = 1, maxval = 12, inline = "s3b", group = gS)
+s3EM  = input.int(0, ":", minval = 0, maxval = 59, inline = "s3b", group = gS)
+s3EA  = input.string("AM", "", options = ["AM", "PM"], inline = "s3b", group = gS)
+
+s4On  = input.bool(true, "", inline = "s4", group = gS)
+s4Nm  = input.string("NY Lunch", "", inline = "s4", group = gS)
+s4Col = input.color(color.new(#787B86, 90), "", inline = "s4", group = gS)
+s4SH  = input.int(12, "    Start", minval = 1, maxval = 12, inline = "s4a", group = gS)
+s4SM  = input.int(0, ":", minval = 0, maxval = 59, inline = "s4a", group = gS)
+s4SA  = input.string("PM", "", options = ["AM", "PM"], inline = "s4a", group = gS)
+s4EH  = input.int(1, "    End  ", minval = 1, maxval = 12, inline = "s4b", group = gS)
+s4EM  = input.int(0, ":", minval = 0, maxval = 59, inline = "s4b", group = gS)
+s4EA  = input.string("PM", "", options = ["AM", "PM"], inline = "s4b", group = gS)
+
+s5On  = input.bool(true, "", inline = "s5", group = gS)
+s5Nm  = input.string("NY PM", "", inline = "s5", group = gS)
+s5Col = input.color(color.new(#FF9800, 90), "", inline = "s5", group = gS)
+s5SH  = input.int(1, "    Start", minval = 1, maxval = 12, inline = "s5a", group = gS)
+s5SM  = input.int(30, ":", minval = 0, maxval = 59, inline = "s5a", group = gS)
+s5SA  = input.string("PM", "", options = ["AM", "PM"], inline = "s5a", group = gS)
+s5EH  = input.int(4, "    End  ", minval = 1, maxval = 12, inline = "s5b", group = gS)
+s5EM  = input.int(0, ":", minval = 0, maxval = 59, inline = "s5b", group = gS)
+s5EA  = input.string("PM", "", options = ["AM", "PM"], inline = "s5b", group = gS)
+
+// =====================================================================================
+// DERIVED SETTINGS
+// =====================================================================================
+lblSize = lblSizeIn == "Tiny" ? size.tiny : lblSizeIn == "Small" ? size.small : size.normal
+tz      = tzIn == "Exchange" ? syminfo.timezone : tzIn == "UTC" ? "GMT+0" : tzIn
+fTxtCol = color.new(chart.fg_color, 40)
+
+// =====================================================================================
+// TYPES
+// =====================================================================================
+// A horizontal liquidity / reference level
+type Liq
+    line  ln
+    label lb
+    float price
+    bool  isHigh
+    color col
+    bool  swept = false
+
+// A Fair Value Gap (normal or inverted)
+type FVG
+    box   bx
+    float top
+    float btm
+    bool  bull
+    bool  armed     = true
+    bool  extending = true
+
+// Running state of one session / killzone
+type Sess
+    float hi
+    float lo
+    int   start
+    bool  active = false
+
+// =====================================================================================
+// FUNCTIONS
+// =====================================================================================
+// 12h clock (hour, minute, AM/PM) -> "HHMM" (24h)
+f_hhmm(int h, int m, string ap) =>
+    int h24 = h % 12 + (ap == "PM" ? 12 : 0)
+    (h24 < 10 ? "0" : "") + str.tostring(h24) + (m < 10 ? "0" : "") + str.tostring(m)
+
+// Build a Pine session string, e.g. "0930-1100:1234567"
+f_sess(int sh, int sm, string sa, int eh, int em, string ea) =>
+    f_hhmm(sh, sm, sa) + "-" + f_hhmm(eh, em, ea) + ":1234567"
+
+// Is the current bar inside the session?
+f_inSess(bool on, string sess) =>
+    int t = time(timeframe.period, sess, tz)
+    on and timeframe.isintraday and not na(t)
+
+// Draw a structure line + centered label (BOS / CHoCH / MSS)
+f_struct(int x1, int x2, float y, string txt, bool bull, color c, string st, int w) =>
+    line  ln = line.new(x1, y, x2, y, color = c, style = st, width = w)
+    label lb = label.new(int((x1 + x2) / 2), y, txt, color = TRANSP, textcolor = c,
+         style = bull ? label.style_label_down : label.style_label_up, size = lblSize)
+    [ln, lb]
+
+// Create a horizontal level that starts at x1 and is extended every bar
+f_level(int x1, float p, bool isHigh, string txt, color c, string st) =>
+    line  ln = line.new(x1, p, bar_index, p, color = c, style = st, width = 1)
+    label lb = na
+    if txt != ""
+        lb := label.new(bar_index, p, txt, color = TRANSP, textcolor = c, style = label.style_label_left, size = size.tiny)
+    Liq.new(ln, lb, p, isHigh, c)
+
+// "✕" marker on the bar where a level gets swept
+f_sweepMark(float p, color c) =>
+    label.new(bar_index, p, "✕", color = TRANSP, textcolor = c, style = label.style_none, size = size.small)
+
+// Extend active levels; stop + mark them when swept (wick through)
+f_updateLiq(array<Liq> arr) =>
+    int n = arr.size()
+    if n > 0
+        for i = n - 1 to 0
+            Liq l = arr.get(i)
+            l.ln.set_x2(bar_index)
+            if not na(l.lb)
+                l.lb.set_x(bar_index)
+            if l.isHigh ? high > l.price : low < l.price
+                f_sweepMark(l.price, l.col)
+                arr.remove(i)
+    n
+
+// Keep at most maxN active levels (oldest simply stop extending)
+f_trim(array<Liq> arr, int maxN) =>
+    while arr.size() > maxN
+        arr.shift()
+    arr.size()
+
+// Previous day / week levels: keep extending all day, turn dotted + mark when swept
+f_updateLevel(Liq l) =>
+    if not na(l)
+        l.ln.set_x2(bar_index)
+        if not na(l.lb)
+            l.lb.set_x(bar_index)
+        if not l.swept and (l.isHigh ? high > l.price : low < l.price)
+            l.swept := true
+            l.ln.set_style(line.style_dotted)
+            f_sweepMark(l.price, l.col)
+    true
+
+f_delLevel(Liq l) =>
+    if not na(l)
+        l.ln.delete()
+        if not na(l.lb)
+            l.lb.delete()
+    true
+
+// Track one session: running high/low, name label, H/L liquidity at session end.
+// Returns true on the first bar after the session ends.
+f_session(Sess s, bool inS, string name, color col, array<Liq> arr) =>
+    bool ended = false
+    if inS
+        if not s.active
+            s.hi    := high
+            s.lo    := low
+            s.start := bar_index
+            if showSessLbl
+                label.new(bar_index, high, name, yloc = yloc.abovebar, color = TRANSP,
+                     textcolor = color.new(col, 0), style = label.style_none, size = size.small)
+        else
+            s.hi := math.max(s.hi, high)
+            s.lo := math.min(s.lo, low)
+    else if s.active
+        ended := true
+        if showSessLiq
+            color c = color.new(col, 20)
+            arr.push(f_level(s.start, s.hi, true,  name + " H", c, line.style_dotted))
+            arr.push(f_level(s.start, s.lo, false, name + " L", c, line.style_dotted))
+    s.active := inS
+    ended
+
+// =====================================================================================
+// CORE SERIES
+// =====================================================================================
+float atr = ta.atr(14)
+float ph  = ta.pivothigh(high, pLen, pLen)
+float pl  = ta.pivotlow(low, pLen, pLen)
+
+bool newDay  = bar_index > 0 and dayofmonth(time, tz) != dayofmonth(time[1], tz)
+bool newWeek = newDay and (dayofweek(time, tz) < dayofweek(time[1], tz) or time - time[1] > 7 * 86400000)
+
+// =====================================================================================
+// SESSIONS / KILLZONES
+// =====================================================================================
+string sess1 = f_sess(s1SH, s1SM, s1SA, s1EH, s1EM, s1EA)
+string sess2 = f_sess(s2SH, s2SM, s2SA, s2EH, s2EM, s2EA)
+string sess3 = f_sess(s3SH, s3SM, s3SA, s3EH, s3EM, s3EA)
+string sess4 = f_sess(s4SH, s4SM, s4SA, s4EH, s4EM, s4EA)
+string sess5 = f_sess(s5SH, s5SM, s5SA, s5EH, s5EM, s5EA)
+
+bool in1 = f_inSess(s1On, sess1)
+bool in2 = f_inSess(s2On, sess2)
+bool in3 = f_inSess(s3On, sess3)
+bool in4 = f_inSess(s4On, sess4)
+bool in5 = f_inSess(s5On, sess5)
+
+var Sess ss1 = Sess.new()
+var Sess ss2 = Sess.new()
+var Sess ss3 = Sess.new()
+var Sess ss4 = Sess.new()
+var Sess ss5 = Sess.new()
+var array<Liq> sessLiq = array.new<Liq>()
+
+bool e1 = f_session(ss1, in1, s1Nm, s1Col, sessLiq)
+bool e2 = f_session(ss2, in2, s2Nm, s2Col, sessLiq)
+bool e3 = f_session(ss3, in3, s3Nm, s3Col, sessLiq)
+bool e4 = f_session(ss4, in4, s4Nm, s4Col, sessLiq)
+bool e5 = f_session(ss5, in5, s5Nm, s5Col, sessLiq)
+f_trim(sessLiq, liqMax * 2)
+
+// FVG "Until Session End": first bar after any enabled killzone ends (falls back to day end)
+bool anySess    = timeframe.isintraday and (s1On or s2On or s3On or s4On or s5On)
+bool sessEndEvt = anySess ? (e1 or e2 or e3 or e4 or e5) : newDay
+
+bgcolor(showSessBg and in1 ? s1Col : na, title = "Killzone 1")
+bgcolor(showSessBg and in2 ? s2Col : na, title = "Killzone 2")
+bgcolor(showSessBg and in3 ? s3Col : na, title = "Killzone 3")
+bgcolor(showSessBg and in4 ? s4Col : na, title = "Killzone 4")
+bgcolor(showSessBg and in5 ? s5Col : na, title = "Killzone 5")
+
+// =====================================================================================
+// PREVIOUS DAY / WEEK HIGH & LOW
+// =====================================================================================
+var float dHi = na
+var float dLo = na
+var float wHi = na
+var float wLo = na
+var Liq pdhLv = na
+var Liq pdlLv = na
+var Liq pwhLv = na
+var Liq pwlLv = na
+
+bool pdOK = showPD and timeframe.in_seconds() < 86400
+bool pwOK = showPW and timeframe.in_seconds() < 604800
+
+if newDay
+    if pdOK and not na(dHi)
+        f_delLevel(pdhLv)
+        f_delLevel(pdlLv)
+        pdhLv := f_level(bar_index, dHi, true,  "PDH", pdCol, line.style_solid)
+        pdlLv := f_level(bar_index, dLo, false, "PDL", pdCol, line.style_solid)
+    dHi := high
+    dLo := low
+else
+    dHi := na(dHi) ? high : math.max(dHi, high)
+    dLo := na(dLo) ? low  : math.min(dLo, low)
+
+if newWeek
+    if pwOK and not na(wHi)
+        f_delLevel(pwhLv)
+        f_delLevel(pwlLv)
+        pwhLv := f_level(bar_index, wHi, true,  "PWH", pwCol, line.style_solid)
+        pwlLv := f_level(bar_index, wLo, false, "PWL", pwCol, line.style_solid)
+    wHi := high
+    wLo := low
+else
+    wHi := na(wHi) ? high : math.max(wHi, high)
+    wLo := na(wLo) ? low  : math.min(wLo, low)
+
+// =====================================================================================
+// MARKET STRUCTURE STATE
+// =====================================================================================
+var int   trend     = 0        // 1 = bullish, -1 = bearish, 0 = undefined
+
+var float shPrice   = na       // latest swing high (unbroken)
+var int   shBar     = na
+var bool  shOpen    = false
+var float slPrice   = na       // latest swing low (unbroken)
+var int   slBar     = na
+var bool  slOpen    = false
+
+var float prevPH    = na       // previous swing high / low (for HH/LH, EQH/EQL)
+var int   prevPHBar = na
+var float prevPL    = na
+var int   prevPLBar = na
+
+// IDM state
+var bool  idmBullWait = false
+var int   idmBullFrom = na
+var bool  idmBullOn   = false
+var float idmBullLvl  = na
+var int   idmBullBar  = na
+var line  idmBullLn   = na
+var bool  idmBearWait = false
+var int   idmBearFrom = na
+var bool  idmBearOn   = false
+var float idmBearLvl  = na
+var int   idmBearBar  = na
+var line  idmBearLn   = na
+
+// Pending CHoCH -> MSS upgrade (break candle turns out to be the middle candle of an FVG)
+var int   pendDir = 0
+var int   pendBar = na
+var int   pendX1  = na
+var float pendLvl = na
+var line  pendLn  = na
+var label pendLb  = na
+
+var array<Liq> bsl = array.new<Liq>()
+var array<Liq> ssl = array.new<Liq>()
+
+// ── 1) Resolve a pending MSS upgrade from the previous bar ───────────────────────────
+if pendDir != 0
+    if bar_index == pendBar + 1
+        bool conf = pendDir == 1 ? low > high[2] : high < low[2]
+        if conf
+            color mc = pendDir == 1 ? mssBullCol : mssBearCol
+            if not na(pendLb)
+                pendLb.set_text("MSS")
+                pendLb.set_textcolor(mc)
+                pendLn.set_color(mc)
+                pendLn.set_style(line.style_solid)
+                pendLn.set_width(2)
+            else
+                [upLn, upLb] = f_struct(pendX1, pendBar, pendLvl, "MSS", pendDir == 1, mc, line.style_solid, 2)
+    pendDir := 0
+
+// ── 2) New swing high ────────────────────────────────────────────────────────────────
+if not na(ph)
+    int b = bar_index - pLen
+    if showSwing
+        string t = na(prevPH) ? "SH" : ph > prevPH ? "HH" : "LH"
+        label.new(b, ph, t, color = TRANSP, textcolor = swHiCol, style = label.style_label_down, size = lblSize)
+    if showEQ and not na(prevPH) and math.abs(ph - prevPH) <= eqTol * atr
+        line.new(prevPHBar, prevPH, b, ph, color = eqCol, style = line.style_dotted, width = 1)
+        label.new(int((prevPHBar + b) / 2), math.max(ph, prevPH), "EQH", color = TRANSP, textcolor = eqCol,
+             style = label.style_label_down, size = size.tiny)
+    if showSwLiq
+        bsl.push(f_level(b, ph, true, "", bslCol, line.style_dashed))
+        f_trim(bsl, liqMax)
+    // First pullback high after a bearish break -> bearish IDM
+    if idmBearWait and b > idmBearFrom
+        idmBearLvl  := ph
+        idmBearBar  := b
+        idmBearLn   := line.new(b, ph, bar_index, ph, color = idmCol, style = line.style_dotted, width = 1)
+        idmBearOn   := true
+        idmBearWait := false
+    prevPH    := ph
+    prevPHBar := b
+    shPrice   := ph
+    shBar     := b
+    shOpen    := true
+
+// ── 3) New swing low ─────────────────────────────────────────────────────────────────
+if not na(pl)
+    int b = bar_index - pLen
+    if showSwing
+        string t = na(prevPL) ? "SL" : pl < prevPL ? "LL" : "HL"
+        label.new(b, pl, t, color = TRANSP, textcolor = swLoCol, style = label.style_label_up, size = lblSize)
+    if showEQ and not na(prevPL) and math.abs(pl - prevPL) <= eqTol * atr
+        line.new(prevPLBar, prevPL, b, pl, color = eqCol, style = line.style_dotted, width = 1)
+        label.new(int((prevPLBar + b) / 2), math.min(pl, prevPL), "EQL", color = TRANSP, textcolor = eqCol,
+             style = label.style_label_up, size = size.tiny)
+    if showSwLiq
+        ssl.push(f_level(b, pl, false, "", sslCol, line.style_dashed))
+        f_trim(ssl, liqMax)
+    // First pullback low after a bullish break -> bullish IDM
+    if idmBullWait and b > idmBullFrom
+        idmBullLvl  := pl
+        idmBullBar  := b
+        idmBullLn   := line.new(b, pl, bar_index, pl, color = idmCol, style = line.style_dotted, width = 1)
+        idmBullOn   := true
+        idmBullWait := false
+    prevPL    := pl
+    prevPLBar := b
+    slPrice   := pl
+    slBar     := b
+    slOpen    := true
+
+// ── 4) IDM sweeps (wick through the inducement level) ────────────────────────────────
+if idmBullOn
+    idmBullLn.set_x2(bar_index)
+    if low < idmBullLvl
+        label.new(int((idmBullBar + bar_index) / 2), idmBullLvl, "IDM", color = TRANSP, textcolor = idmCol,
+             style = label.style_label_up, size = lblSize)
+        idmBullOn := false
+
+if idmBearOn
+    idmBearLn.set_x2(bar_index)
+    if high > idmBearLvl
+        label.new(int((idmBearBar + bar_index) / 2), idmBearLvl, "IDM", color = TRANSP, textcolor = idmCol,
+             style = label.style_label_down, size = lblSize)
+        idmBearOn := false
+
+// ── 5) Bullish structure break (candle CLOSE above swing high) ───────────────────────
+if shOpen and close > shPrice
+    shOpen := false
+    bool isChoch = trend == -1
+    if isChoch
+        bool bigBody = math.abs(close - open) >= dispMult * atr
+        bool gapNow  = low > high[2]
+        bool isMss   = (mssRule != "FVG" and bigBody) or (mssRule != "Large Body" and gapNow)
+        line  cLn = na
+        label cLb = na
+        if isMss and showMSS
+            [mLn, mLb] = f_struct(shBar, bar_index, shPrice, "MSS", true, mssBullCol, line.style_solid, 2)
+        else if showCHoCH
+            [chLn, chLb] = f_struct(shBar, bar_index, shPrice, "CHoCH", true, bullCol, line.style_dashed, 1)
+            cLn := chLn
+            cLb := chLb
+        if not isMss and showMSS and mssRule != "Large Body"
+            pendDir := 1
+            pendBar := bar_index
+            pendX1  := shBar
+            pendLvl := shPrice
+            pendLn  := cLn
+            pendLb  := cLb
+    else if showBOS
+        [bLn, bLb] = f_struct(shBar, bar_index, shPrice, "BOS", true, bullCol, line.style_solid, 1)
+    // IDM bookkeeping
+    if idmBearOn
+        idmBearLn.delete()
+        idmBearOn := false
+    idmBearWait := false
+    if showIDM and (not isChoch or idmAfter == "BOS + CHoCH/MSS")
+        if idmBullOn
+            idmBullLn.delete()
+            idmBullOn := false
+        idmBullWait := true
+        idmBullFrom := bar_index
+    trend := 1
+
+// ── 6) Bearish structure break (candle CLOSE below swing low) ────────────────────────
+if slOpen and close < slPrice
+    slOpen := false
+    bool isChoch = trend == 1
+    if isChoch
+        bool bigBody = math.abs(close - open) >= dispMult * atr
+        bool gapNow  = high < low[2]
+        bool isMss   = (mssRule != "FVG" and bigBody) or (mssRule != "Large Body" and gapNow)
+        line  cLn = na
+        label cLb = na
+        if isMss and showMSS
+            [mLn, mLb] = f_struct(slBar, bar_index, slPrice, "MSS", false, mssBearCol, line.style_solid, 2)
+        else if showCHoCH
+            [chLn, chLb] = f_struct(slBar, bar_index, slPrice, "CHoCH", false, bearCol, line.style_dashed, 1)
+            cLn := chLn
+            cLb := chLb
+        if not isMss and showMSS and mssRule != "Large Body"
+            pendDir := -1
+            pendBar := bar_index
+            pendX1  := slBar
+            pendLvl := slPrice
+            pendLn  := cLn
+            pendLb  := cLb
+    else if showBOS
+        [bLn, bLb] = f_struct(slBar, bar_index, slPrice, "BOS", false, bearCol, line.style_solid, 1)
+    // IDM bookkeeping
+    if idmBullOn
+        idmBullLn.delete()
+        idmBullOn := false
+    idmBullWait := false
+    if showIDM and (not isChoch or idmAfter == "BOS + CHoCH/MSS")
+        if idmBearOn
+            idmBearLn.delete()
+            idmBearOn := false
+        idmBearWait := true
+        idmBearFrom := bar_index
+    trend := -1
+
+// =====================================================================================
+// FAIR VALUE GAPS / INVERTED FAIR VALUE GAPS
+// =====================================================================================
+var array<FVG> fvgs  = array.new<FVG>()
+var array<FVG> ifvgs = array.new<FVG>()
+
+// ── Update IFVGs ─────────────────────────────────────────────────────────────────────
+int nI = ifvgs.size()
+if nI > 0
+    for i = nI - 1 to 0
+        FVG g = ifvgs.get(i)
+        bool broke  = g.bull ? close < g.btm : close > g.top
+        bool tapped = g.armed and (g.bull ? low <= g.top : high >= g.btm)
+        if not g.armed and (g.bull ? low > g.top : high < g.btm)
+            g.armed := true
+        bool stop = broke or (ifvgMode == MODE_TAP ? tapped : ifvgMode == MODE_SES ? sessEndEvt : newDay)
+        if stop
+            int rightX = broke or ifvgMode == MODE_TAP ? bar_index : bar_index - 1
+            g.bx.set_right(math.max(rightX, g.bx.get_left()))
+            ifvgs.remove(i)
+        else
+            g.bx.set_right(bar_index)
+
+// ── Update FVGs (and convert to IFVG on a close through) ─────────────────────────────
+int nF = fvgs.size()
+if nF > 0
+    for i = nF - 1 to 0
+        FVG f = fvgs.get(i)
+        bool kill    = false
+        bool through = f.bull ? close < f.btm : close > f.top
+        if through
+            if f.extending and not na(f.bx)
+                f.bx.set_right(bar_index)
+            kill := true
+            if showIFVG
+                bool nb = not f.bull
+                box ib = box.new(bar_index, f.top, bar_index, f.btm, border_color = TRANSP,
+                     bgcolor = nb ? ifvgBullCol : ifvgBearCol, text = showFText ? "IFVG" : "",
+                     text_size = size.tiny, text_color = fTxtCol, text_halign = text.align_right)
+                ifvgs.push(FVG.new(ib, f.top, f.btm, nb, false))
+        else if f.extending
+            bool tapped = f.bull ? low <= f.top : high >= f.btm
+            bool stop   = fvgMode == MODE_TAP ? tapped : fvgMode == MODE_SES ? sessEndEvt : newDay
+            if stop
+                if not na(f.bx)
+                    f.bx.set_right(fvgMode == MODE_TAP ? bar_index : bar_index - 1)
+                f.extending := false
+                // Tapped FVGs stay tracked (frozen) so a later close through can still create an IFVG
+                kill := fvgMode != MODE_TAP
+            else if not na(f.bx)
+                f.bx.set_right(bar_index)
+        if kill
+            fvgs.remove(i)
+
+while ifvgs.size() > fvgMax
+    ifvgs.shift()
+
+// ── Detect new FVGs ──────────────────────────────────────────────────────────────────
+if (showFVG or showIFVG) and bar_index >= 2
+    float minGap  = fvgMinAtr * nz(atr)
+    bool  bullGap = low > high[2] and close[1] > high[2] and (low - high[2]) >= minGap
+    bool  bearGap = high < low[2] and close[1] < low[2] and (low[2] - high) >= minGap
+    if bullGap
+        box b = na
+        if showFVG
+            b := box.new(bar_index - 2, low, bar_index, high[2], border_color = TRANSP, bgcolor = fvgBullCol,
+                 text = showFText ? "FVG" : "", text_size = size.tiny, text_color = fTxtCol, text_halign = text.align_right)
+        fvgs.push(FVG.new(b, low, high[2], true))
+    if bearGap
+        box b = na
+        if showFVG
+            b := box.new(bar_index - 2, low[2], bar_index, high, border_color = TRANSP, bgcolor = fvgBearCol,
+                 text = showFText ? "FVG" : "", text_size = size.tiny, text_color = fTxtCol, text_halign = text.align_right)
+        fvgs.push(FVG.new(b, low[2], high, false))
+    while fvgs.size() > fvgMax
+        fvgs.shift()
+
+// =====================================================================================
+// LIQUIDITY UPDATES
+// =====================================================================================
+f_updateLiq(bsl)
+f_updateLiq(ssl)
+f_updateLiq(sessLiq)
+
+f_updateLevel(pdhLv)
+f_updateLevel(pdlLv)
+f_updateLevel(pwhLv)
+f_updateLevel(pwlLv)
